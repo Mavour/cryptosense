@@ -53,7 +53,7 @@ async function processQueue() {
   } finally {
     _aiQueueRunning = false;
     // Jeda 1.5 detik antar request — cegah burst rate limit
-    setTimeout(processQueue, 1500);
+    setTimeout(processQueue, 3000);
   }
 }
 
@@ -102,12 +102,12 @@ async function callAIInner(messages, maxTokens, modelIndex = 0) {
       const nextModel = MODEL_FALLBACKS[modelIndex + 1];
       if (nextModel) {
         console.warn(`[AI] Rate limit on ${model}, switching to ${nextModel}...`);
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, 8000));
         return callAIInner(messages, maxTokens, modelIndex + 1);
       }
       // Semua model kena rate limit — tunggu 30 detik lalu retry dari awal
-      console.warn('[AI] All models rate limited, waiting 30s...');
-      await new Promise(r => setTimeout(r, 30000));
+      console.warn('[AI] All models rate limited, waiting 60s...');
+      await new Promise(r => setTimeout(r, 60000));
       return callAIInner(messages, maxTokens, 0);
     }
 
