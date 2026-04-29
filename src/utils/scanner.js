@@ -142,10 +142,12 @@ export async function runCoinScan(limit = 150) {
         newsScore: parseFloat(newsScore.toFixed(1)),
         score,
         // Data TA lengkap untuk entry/exit
+        // Scanner selalu cari peluang LONG — SL di bawah harga, TP di atas
         signal: ta.signal.direction,
-        sl: ta.riskManagement.suggestedSL,
-        tp: ta.riskManagement.suggestedTP,
-        rr: ta.riskManagement.riskRewardRatio,
+        atr: ta.indicators.atr,
+        sl: parseFloat((ta.currentPrice - ta.indicators.atr * 1.5).toFixed(6)),
+        tp: parseFloat((ta.currentPrice + ta.indicators.atr * 2.5).toFixed(6)),
+        rr: 1.67,
         support: ta.supportResistance.supports[0] || null,
         resistance: ta.supportResistance.resistances[0] || null,
         ema20: ta.indicators.ema20,
@@ -197,6 +199,16 @@ export async function runCoinScan(limit = 150) {
 // ─────────────────────────────────────────────
 // Fallback formatter jika AI gagal
 // ─────────────────────────────────────────────
+// Format harga sesuai magnitude — hindari terlalu banyak atau sedikit desimal
+function fmt(price) {
+  if (!price && price !== 0) return 'N/A';
+  if (price >= 10000) return price.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  if (price >= 100)   return price.toFixed(2);
+  if (price >= 1)     return price.toFixed(4);
+  if (price >= 0.01)  return price.toFixed(5);
+  return price.toFixed(6);
+}
+
 function formatFallbackScanResult(candidates) {
   const top5 = candidates.slice(0, 5);
   const signalEmoji = { BUY: '🟢', SELL: '🔴', NEUTRAL: '🟡' };
@@ -204,24 +216,27 @@ function formatFallbackScanResult(candidates) {
   text += `_${new Date().toLocaleString('id-ID')}_\n\n`;
 
   top5.forEach((c, i) => {
-    const changeEmoji = c.change24h >= 0 ? '📈' : '📉';
     const sig = signalEmoji[c.signal] || '🟡';
+    const pct = `${c.change24h >= 0 ? '+' : ''}${c.change24h}%`;
+
     text += `*${i + 1}. ${c.symbol}* ${sig} — Score: *${c.score}/10*\n`;
-    text += `💰 Harga: $${c.price} | 24h: ${c.change24h >= 0 ? '+' : ''}${c.change24h}%\n`;
+    text += `💰 Harga: $${fmt(c.price)} | 24h: ${pct}\n`;
     text += `📊 RSI: ${c.rsi} | Vol: ${c.volumeSpike}x rata-rata\n`;
 
     if (c.sl && c.tp) {
-      // Hitung entry zone: antara harga sekarang dan support terdekat
-      const entryLow = c.support ? Math.min(c.price, c.support * 1.005).toFixed(6) : (c.price * 0.995).toFixed(6);
-      const entryHigh = c.price.toFixed ? c.price.toFixed(6) : c.price;
-      text += `🎯 Entry: $${entryLow} – $${entryHigh}\n`;
-      text += `🔴 Stop Loss: $${c.sl} | 🎯 TP: $${c.tp}\n`;
+      // Entry zone: support terdekat → harga sekarang
+      const entryLow  = c.support ? fmt(Math.min(c.price * 0.998, c.support * 1.003)) : fmt(c.price * 0.995);
+      const entryHigh = fmt(c.price);
+      const slPct  = (((c.price - c.sl) / c.price) * 100).toFixed(1);
+      const tpPct  = (((c.tp - c.price) / c.price) * 100).toFixed(1);
+      text += `🎯 Entry Zone: $${entryLow} – $${entryHigh}\n`;
+      text += `🔴 SL: $${fmt(c.sl)} (-${slPct}%) | 🎯 TP: $${fmt(c.tp)} (+${tpPct}%)\n`;
       text += `⚖️ R:R = 1:${c.rr}\n`;
     }
-    if (c.resistance) text += `🧱 Resistance: $${c.resistance}\n`;
+    if (c.resistance) text += `🧱 Next Resistance: $${fmt(c.resistance)}\n`;
     text += '\n';
   });
 
-  text += '_⚠️ Bukan financial advice. Entry/exit berbasis ATR. Selalu cek chart sendiri._';
+  text += '_⚠️ Bukan financial advice. SL/TP berbasis ATR 1H. Selalu cek chart sebelum entry._';
   return text;
 }
