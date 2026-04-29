@@ -10,23 +10,68 @@
 import axios from 'axios';
 
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
-const MODEL = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free';
 
 // ─────────────────────────────────────────────
-// Core AI Request
+// Model fallback list — dicoba urut dari atas
+// Semua gratis di OpenRouter free tier
+// ─────────────────────────────────────────────
+const MODEL_FALLBACKS = [
+  process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free',
+  'google/gemini-flash-1.5',
+  'deepseek/deepseek-chat:free',
+  'mistralai/mistral-7b-instruct:free',
+];
+
+// ─────────────────────────────────────────────
+// Simple queue — cegah concurrent AI calls
+// yang menyebabkan rate limit
+// ─────────────────────────────────────────────
+let _aiQueueRunning = false;
+const _aiQueue = [];
+
+function enqueueAI(fn) {
+  return new Promise((resolve, reject) => {
+    _aiQueue.push({ fn, resolve, reject });
+    processQueue();
+  });
+}
+
+async function processQueue() {
+  if (_aiQueueRunning || _aiQueue.length === 0) return;
+  _aiQueueRunning = true;
+  const { fn, resolve, reject } = _aiQueue.shift();
+  try {
+    resolve(await fn());
+  } catch (e) {
+    reject(e);
+  } finally {
+    _aiQueueRunning = false;
+    // Jeda 1.5 detik antar request — cegah burst rate limit
+    setTimeout(processQueue, 1500);
+  }
+}
+
+// ─────────────────────────────────────────────
+// Core AI Request — retry + model fallback
 // ─────────────────────────────────────────────
 async function callAI(messages, maxTokens = 800) {
+  return enqueueAI(() => callAIInner(messages, maxTokens));
+}
+
+async function callAIInner(messages, maxTokens, modelIndex = 0) {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) throw new Error('OPENROUTER_API_KEY not set in .env');
+
+  const model = MODEL_FALLBACKS[modelIndex] || MODEL_FALLBACKS[0];
 
   try {
     const res = await axios.post(
       `${OPENROUTER_BASE}/chat/completions`,
       {
-        model: MODEL,
+        model,
         messages,
         max_tokens: maxTokens,
-        temperature: 0.3, // Rendah = lebih deterministik untuk analisis
+        temperature: 0.3,
       },
       {
         headers: {
@@ -35,7 +80,7 @@ async function callAI(messages, maxTokens = 800) {
           'HTTP-Referer': 'https://github.com/cryptosense-bot',
           'X-Title': 'CryptoSense Trading Bot',
         },
-        timeout: 30000,
+        timeout: 45000,
       }
     );
 
@@ -44,12 +89,31 @@ async function callAI(messages, maxTokens = 800) {
     return content;
 
   } catch (err) {
-    if (err.response?.status === 429) {
-      throw new Error('Rate limit reached. Coba lagi dalam 1 menit.');
+    const status = err.response?.status;
+
+    // Rate limit (429) — tunggu lalu coba model berikutnya
+    if (status === 429) {
+      const nextModel = MODEL_FALLBACKS[modelIndex + 1];
+      if (nextModel) {
+        console.warn(`[AI] Rate limit on ${model}, switching to ${nextModel}...`);
+        await new Promise(r => setTimeout(r, 3000));
+        return callAIInner(messages, maxTokens, modelIndex + 1);
+      }
+      // Semua model kena rate limit — tunggu 30 detik lalu retry dari awal
+      console.warn('[AI] All models rate limited, waiting 30s...');
+      await new Promise(r => setTimeout(r, 30000));
+      return callAIInner(messages, maxTokens, 0);
     }
-    if (err.response?.status === 402) {
-      throw new Error('Credit habis di OpenRouter. Cek akun kamu.');
+
+    if (status === 402) throw new Error('Credit habis di OpenRouter. Cek akun kamu.');
+
+    // Error lain — coba model berikutnya
+    if (modelIndex < MODEL_FALLBACKS.length - 1) {
+      console.warn(`[AI] Error on ${model} (${err.message}), trying next model...`);
+      await new Promise(r => setTimeout(r, 1000));
+      return callAIInner(messages, maxTokens, modelIndex + 1);
     }
+
     throw new Error(`AI Error: ${err.message}`);
   }
 }
