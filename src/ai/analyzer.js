@@ -12,6 +12,17 @@ import axios from 'axios';
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 
 // ─────────────────────────────────────────────
+// Vision model list — untuk analisis chart image
+// Dipisah dari text model karena tidak semua model support vision
+// ─────────────────────────────────────────────
+const VISION_MODELS = [
+  'google/gemma-3-27b-it:free',        // Gemma 3 27B — vision + text, terbaik dari list
+  'google/gemma-4-31b-it:free',        // Gemma 4 31B — terbaru dari Google
+  'google/gemma-3-12b-it:free',        // Gemma 3 12B — fallback lebih ringan
+  'nvidia/nemotron-nano-12b-v2-vl:free', // Nemotron VL — dedicated vision-language
+];
+
+// ─────────────────────────────────────────────
 // Model fallback list — dicoba urut dari atas
 // Semua gratis di OpenRouter free tier
 // ─────────────────────────────────────────────
@@ -410,6 +421,96 @@ Format output:
 // ─────────────────────────────────────────────
 // PUBLIC API
 // ─────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// CHART IMAGE ANALYZER — analisis screenshot chart via vision model
+// ─────────────────────────────────────────────
+export async function analyzeChartImage(base64Image, mimeType = 'image/jpeg', userNote = '') {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) throw new Error('OPENROUTER_API_KEY not set in .env');
+
+  const noteSection = userNote
+    ? `\nCatatan dari user: "${userNote}"\n`
+    : '';
+
+  const prompt = `Kamu adalah CryptoSense, AI Trading Analyst. Analisis screenshot chart trading ini.${noteSection}
+
+Berikan analisis dengan format:
+
+**📊 ANALISIS CHART**
+
+**Identifikasi:**
+[Coin/pair apa, timeframe berapa jika terlihat]
+
+**Kondisi Trend:**
+[Bull/Bear/Sideways berdasarkan price action yang terlihat]
+
+**Indikator yang Terlihat:**
+[Sebutkan dan interpretasikan indikator yang ada di chart — RSI, MACD, EMA, BB, dll]
+
+**Pattern & Structure:**
+[Candlestick pattern, support/resistance, Order Block, FVG, atau Elliott Wave yang teridentifikasi]
+
+**🎯 Rekomendasi:**
+• Action: BUY / SELL / WAIT
+• Entry: $[level atau range]
+• Stop Loss: $[level] ([%])
+• Target 1: $[level] ([%])
+• Target 2: $[level] ([%])
+• Confidence: [Tinggi/Sedang/Rendah] — [alasan]
+
+⚠️ Disclaimer: Analisis visual bersifat subjektif. Konfirmasi dengan data real-time sebelum entry.`;
+
+  // Coba vision models satu per satu sampai berhasil
+  let lastError;
+  for (const model of VISION_MODELS) {
+    try {
+      const res = await axios.post(
+        `${OPENROUTER_BASE}/chat/completions`,
+        {
+          model,
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'image_url',
+                  image_url: { url: `data:${mimeType};base64,${base64Image}` },
+                },
+                { type: 'text', text: prompt },
+              ],
+            },
+          ],
+          max_tokens: 900,
+          temperature: 0.3,
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': 'https://github.com/cryptosense-bot',
+            'X-Title': 'CryptoSense Trading Bot',
+          },
+          timeout: 60000,
+        }
+      );
+
+      const content = res.data.choices?.[0]?.message?.content;
+      if (!content) throw new Error('Empty vision response');
+      console.log(`[AI Vision] Success with ${model}`);
+      return content;
+
+    } catch (err) {
+      console.warn(`[AI Vision] ${model} failed: ${err.message}`);
+      lastError = err;
+      // Jeda sebentar sebelum coba model berikutnya
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+
+  throw lastError || new Error('All vision models failed');
+}
+
 export async function analyzeSignal(analysis, newsContext = '') {
   const prompt = buildSignalPrompt(analysis, newsContext);
   return await callAI([

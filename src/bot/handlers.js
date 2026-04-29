@@ -7,10 +7,11 @@
  */
 
 import { Bot, InlineKeyboard } from 'grammy';
+import axios from 'axios';
 import { fetchBinanceKlines, fetchBinanceTicker, fetchCryptoNews,
          fetchFearGreedIndex, fetchBTCDominance, fetchTrendingCoins, formatPrice } from '../ta/marketData.js';
 import { runFullAnalysis } from '../ta/indicators.js';
-import { analyzeSignal, analyzeElliottWave, analyzeNews, analyzeMacro, freeChat } from '../ai/analyzer.js';
+import { analyzeSignal, analyzeElliottWave, analyzeNews, analyzeMacro, freeChat, analyzeChartImage } from '../ai/analyzer.js';
 import { addToWatchlist, removeFromWatchlist, getWatchlist, upsertUser, getStats } from '../utils/database.js';
 import { runCoinScan } from '../utils/scanner.js';
 
@@ -503,6 +504,66 @@ export function createBot() {
     } catch (err) {
       await ctx.api.deleteMessage(ctx.chat.id, typingMsg.message_id).catch(() => {});
       await ctx.reply(`❌ Error: ${formatError(err)}`, { parse_mode: 'Markdown' });
+    }
+  });
+
+  // ─────────────────────────────────────────────
+  // Photo handler — analisis chart dari screenshot
+  // ─────────────────────────────────────────────
+  bot.on('message:photo', async (ctx) => {
+    const caption = ctx.message.caption || '';
+    const statusMsg = await ctx.reply(
+      '🖼 Screenshot diterima! Menganalisis chart...\n_Ini membutuhkan 15-30 detik..._',
+      { parse_mode: 'Markdown' }
+    );
+
+    try {
+      // Ambil foto resolusi tertinggi
+      const photos = ctx.message.photo;
+      const bestPhoto = photos[photos.length - 1];
+      const fileId = bestPhoto.file_id;
+
+      // Download foto dari Telegram
+      const token = process.env.TELEGRAM_BOT_TOKEN;
+      const fileRes = await axios.get(
+        `https://api.telegram.org/bot${token}/getFile?file_id=${fileId}`,
+        { timeout: 10000 }
+      );
+      const filePath = fileRes.data.result.file_path;
+      const fileUrl  = `https://api.telegram.org/file/bot${token}/${filePath}`;
+
+      // Download sebagai buffer lalu convert ke base64
+      const imgRes = await axios.get(fileUrl, {
+        responseType: 'arraybuffer',
+        timeout: 20000,
+      });
+      const base64Image = Buffer.from(imgRes.data).toString('base64');
+      const mimeType = filePath.endsWith('.png') ? 'image/png' : 'image/jpeg';
+
+      await editMessage(ctx, statusMsg, '🤖 AI sedang membaca chart...');
+
+      const analysis = await analyzeChartImage(base64Image, mimeType, caption);
+
+      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+      await ctx.reply(analysis, { parse_mode: 'Markdown' });
+
+    } catch (err) {
+      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+
+      // Vision model mungkin tidak tersedia — kasih pesan yang helpful
+      if (err.message.includes('404') || err.message.includes('vision')) {
+        await ctx.reply(
+          '⚠️ *Model vision tidak tersedia saat ini.*\n\n' +
+          'Coba kirim detail chart secara manual:\n' +
+          '• Coin & timeframe (contoh: BTC 4h)\n' +
+          '• Harga sekarang\n' +
+          '• RSI, EMA yang kamu lihat\n\n' +
+          'Atau gunakan /analyze BTC 4h untuk analisis otomatis.',
+          { parse_mode: 'Markdown' }
+        );
+      } else {
+        await ctx.reply(`❌ Error: ${formatError(err)}`, { parse_mode: 'Markdown' });
+      }
     }
   });
 
