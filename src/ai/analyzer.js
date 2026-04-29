@@ -16,10 +16,16 @@ const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 // Semua gratis di OpenRouter free tier
 // ─────────────────────────────────────────────
 const MODEL_FALLBACKS = [
+  // Primary — Llama 3.3 70B, default pilihan terbaik untuk analisis TA
   process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free',
-  'google/gemini-flash-1.5',
-  'deepseek/deepseek-chat:free',
-  'mistralai/mistral-7b-instruct:free',
+  // Fallback 1 — Hermes 405B, model terbesar di list, reasoning kuat
+  'nousresearch/hermes-3-llama-3.1-405b:free',
+  // Fallback 2 — GPT OSS 120B dari OpenAI, besar dan cepat
+  'openai/gpt-oss-120b:free',
+  // Fallback 3 — Gemma 3 27B dari Google
+  'google/gemma-3-27b-it:free',
+  // Fallback 4 — Qwen3 Coder, bagus untuk structured output
+  'qwen/qwen3-coder:free',
 ];
 
 // ─────────────────────────────────────────────
