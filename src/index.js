@@ -161,6 +161,22 @@ async function main() {
     process.exit(0);
   });
 
+  // ── Set command menu Telegram (muncul saat user klik "/" di input) ──
+  await bot.api.setMyCommands([
+    { command: 'signal',  description: '⚡ Sinyal beli/jual + SL & TP  |  /signal BTC' },
+    { command: 'analyze', description: '📊 Analisis lengkap TA + AI    |  /analyze ETH 4h' },
+    { command: 'wave',    description: '🌊 Elliott Wave explanation     |  /wave SOL' },
+    { command: 'news',    description: '📰 Analisis sentimen berita     |  /news BTC' },
+    { command: 'scan',    description: '🔍 Cari coin berpotensi naik sekarang' },
+    { command: 'macro',   description: '🌍 Overview kondisi makro market' },
+    { command: 'watch',   description: '👁 Tambah watchlist  |  /watch BTC ETH SOL' },
+    { command: 'list',    description: '📋 Lihat watchlist + harga terkini' },
+    { command: 'unwatch', description: '🗑 Hapus dari watchlist  |  /unwatch BTC' },
+    { command: 'status',  description: '🤖 Status bot & statistik' },
+    { command: 'help',    description: '📖 Panduan lengkap semua command' },
+  ]);
+  console.log('[Main] ✅ Command menu registered in Telegram');
+
   // Start bot
   console.log('[Main] Starting bot...');
   await bot.start({
