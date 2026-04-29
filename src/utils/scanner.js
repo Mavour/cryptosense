@@ -24,7 +24,15 @@ const FILTERS = {
   rsiOversoldMax: 45,               // RSI < 45 = potential reversal
   rsiOverboughtMin: 55,             // RSI > 55 = momentum
   minPriceChange1h: 1.5,            // Min 1.5% naik dalam 1 jam
-  excludeStablecoins: ['USDT', 'USDC', 'BUSD', 'DAI', 'TUSD', 'USDP', 'FRAX'],
+  excludeStablecoins: [
+    // USD pegged
+    'USDT','USDC','BUSD','DAI','TUSD','USDP','FRAX','USDE','PYUSD',
+    'FDUSD','USDX','BFUSD','RLUSD','USDS','CUSD','CEUR','LUSD',
+    // BTC/ETH wrapped
+    'WBTC','WETH','STETH','WEETH','RETH','CBETH',
+    // Other pegged / yield stables
+    'XAUT','PAXG',  // gold-backed — tidak cocok untuk scalp crypto
+  ],
   excludeCoins: ['WBTC', 'WETH', 'STETH'],
   maxCandlesToFetch: 50,
 };

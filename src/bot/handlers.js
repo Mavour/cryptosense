@@ -151,6 +151,15 @@ export function createBot() {
       const signalEmoji = { BUY: '🟢', SELL: '🔴', NEUTRAL: '🟡' };
       const strengthEmoji = { STRONG: '⚡⚡⚡', MODERATE: '⚡⚡', WEAK: '⚡' };
 
+      // SL/TP selalu dihitung dari ATR agar arahnya benar
+      // SL selalu di bawah harga (untuk long/buy bias)
+      // TP selalu di atas harga
+      const atr = indicators.atr || (currentPrice * 0.01);
+      const sl  = parseFloat((currentPrice - atr * 1.5).toFixed(6));
+      const tp  = parseFloat((currentPrice + atr * 2.5).toFixed(6));
+      const slPct = (((currentPrice - sl) / currentPrice) * 100).toFixed(2);
+      const tpPct = (((tp - currentPrice) / currentPrice) * 100).toFixed(2);
+
       const msg =
         `${signalEmoji[signal.direction]} *SIGNAL — ${symbol}*\n\n` +
         `💰 Harga: *$${formatPrice(currentPrice)}*\n` +
@@ -160,10 +169,11 @@ export function createBot() {
         `• RSI: ${indicators.rsi} ${indicators.rsi < 30 ? '🔴 Oversold' : indicators.rsi > 70 ? '🔴 Overbought' : '⚪'}\n` +
         `• EMA20 ${indicators.ema20 > indicators.ema50 ? '>' : '<'} EMA50 ${indicators.ema20 > indicators.ema50 ? '✅' : '❌'}\n` +
         `• MACD Histogram: ${indicators.macd.histogram > 0 ? '🟢 Positif' : '🔴 Negatif'} (${indicators.macd.histogram})\n\n` +
-        `*Risk Management:*\n` +
-        `• 🔴 Stop Loss: $${formatPrice(riskManagement.suggestedSL)}\n` +
-        `• 🎯 Take Profit: $${formatPrice(riskManagement.suggestedTP)}\n` +
-        `• ⚖️ R:R Ratio: 1:${riskManagement.riskRewardRatio}\n\n` +
+        `*Risk Management (ATR-based):*\n` +
+        `• 🎯 Entry: $${formatPrice(currentPrice)}\n` +
+        `• 🔴 Stop Loss: $${formatPrice(sl)} (-${slPct}%)\n` +
+        `• 🎯 Take Profit: $${formatPrice(tp)} (+${tpPct}%)\n` +
+        `• ⚖️ R:R Ratio: 1:1.67\n\n` +
         `_⚠️ Bukan financial advice. Timeframe: 1H._`;
 
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
