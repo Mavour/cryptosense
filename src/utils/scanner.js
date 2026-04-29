@@ -11,7 +11,7 @@
  */
 
 import { fetchTopCoins, fetchBinanceKlines, fetchCryptoNews } from '../ta/marketData.js';
-import { calculateRSI, detectVolumeSpike } from '../ta/indicators.js';
+import { calculateRSI, detectVolumeSpike, runFullAnalysis } from '../ta/indicators.js';
 import { scoreDiscoveredCoins } from '../ai/analyzer.js';
 import { saveScanResult } from './database.js';
 
@@ -103,13 +103,18 @@ export async function runCoinScan(limit = 150) {
     const symbol = coin.symbol.toUpperCase();
 
     try {
-      // Fetch klines untuk RSI dan volume spike
+      // Fetch klines + full TA analysis (dapat RSI, SL/TP, volume spike sekaligus)
       const candles = await fetchBinanceKlines(symbol, '1h', FILTERS.maxCandlesToFetch);
-      const closes = candles.map(c => c.close);
-      const rsiValues = calculateRSI(closes, 14);
-      const rsi = rsiValues[rsiValues.length - 1] || 50;
-      const vs = detectVolumeSpike(candles, 20, FILTERS.minVolumeSpike);
-      const volumeSpike = vs?.spikeRatio || 1;
+      let ta;
+      try {
+        ta = runFullAnalysis(candles, symbol, '1h');
+      } catch (e) {
+        // Candles kurang (coin baru) — skip
+        continue;
+      }
+
+      const rsi = ta.indicators.rsi || 50;
+      const volumeSpike = ta.indicators.volumeSpike?.spikeRatio || 1;
       const newsScore = Math.max(0, newsMap[symbol] || 0);
 
       // Apply RSI filter
@@ -121,7 +126,7 @@ export async function runCoinScan(limit = 150) {
       if (!rsiOk && !volumeOk && !changeOk) continue;
 
       const score = scoreCoin(coin, rsi, volumeSpike, newsScore);
-      if (score < 3) continue; // Minimum score threshold
+      if (score < 3) continue;
 
       candidates.push({
         symbol,
@@ -136,6 +141,15 @@ export async function runCoinScan(limit = 150) {
         volumeSpike: parseFloat(volumeSpike.toFixed(2)),
         newsScore: parseFloat(newsScore.toFixed(1)),
         score,
+        // Data TA lengkap untuk entry/exit
+        signal: ta.signal.direction,
+        sl: ta.riskManagement.suggestedSL,
+        tp: ta.riskManagement.suggestedTP,
+        rr: ta.riskManagement.riskRewardRatio,
+        support: ta.supportResistance.supports[0] || null,
+        resistance: ta.supportResistance.resistances[0] || null,
+        ema20: ta.indicators.ema20,
+        ema50: ta.indicators.ema50,
       });
 
       // Small delay to respect rate limits
@@ -165,6 +179,7 @@ export async function runCoinScan(limit = 150) {
     aiAnalysis = await scoreDiscoveredCoins(topCandidates);
   } catch (e) {
     console.error('[Scanner] AI analysis failed:', e.message);
+    console.error('[Scanner] Using fallback formatter (check OPENROUTER_API_KEY in .env)');
     aiAnalysis = formatFallbackScanResult(topCandidates);
   }
 
@@ -184,15 +199,29 @@ export async function runCoinScan(limit = 150) {
 // ─────────────────────────────────────────────
 function formatFallbackScanResult(candidates) {
   const top5 = candidates.slice(0, 5);
-  let text = '🔍 *TOP PICKS (Auto-Scan)*\n\n';
+  const signalEmoji = { BUY: '🟢', SELL: '🔴', NEUTRAL: '🟡' };
+  let text = '🔍 *COIN DISCOVERY — TOP PICKS*\n';
+  text += `_${new Date().toLocaleString('id-ID')}_\n\n`;
 
   top5.forEach((c, i) => {
     const changeEmoji = c.change24h >= 0 ? '📈' : '📉';
-    text += `*${i + 1}. ${c.symbol}* — Score: ${c.score}/10\n`;
-    text += `${changeEmoji} Price: $${c.price} | 24h: ${c.change24h}%\n`;
-    text += `📊 RSI: ${c.rsi} | Vol Spike: ${c.volumeSpike}x\n\n`;
+    const sig = signalEmoji[c.signal] || '🟡';
+    text += `*${i + 1}. ${c.symbol}* ${sig} — Score: *${c.score}/10*\n`;
+    text += `💰 Harga: $${c.price} | 24h: ${c.change24h >= 0 ? '+' : ''}${c.change24h}%\n`;
+    text += `📊 RSI: ${c.rsi} | Vol: ${c.volumeSpike}x rata-rata\n`;
+
+    if (c.sl && c.tp) {
+      // Hitung entry zone: antara harga sekarang dan support terdekat
+      const entryLow = c.support ? Math.min(c.price, c.support * 1.005).toFixed(6) : (c.price * 0.995).toFixed(6);
+      const entryHigh = c.price.toFixed ? c.price.toFixed(6) : c.price;
+      text += `🎯 Entry: $${entryLow} – $${entryHigh}\n`;
+      text += `🔴 Stop Loss: $${c.sl} | 🎯 TP: $${c.tp}\n`;
+      text += `⚖️ R:R = 1:${c.rr}\n`;
+    }
+    if (c.resistance) text += `🧱 Resistance: $${c.resistance}\n`;
+    text += '\n';
   });
 
-  text += '_⚠️ Bukan financial advice. Selalu lakukan analisis sendiri._';
+  text += '_⚠️ Bukan financial advice. Entry/exit berbasis ATR. Selalu cek chart sendiri._';
   return text;
 }
