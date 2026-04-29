@@ -56,9 +56,14 @@ async function fetchWithRetry(fn, retries = 3, delayMs = 1000) {
 // ─────────────────────────────────────────────
 function normalizeBinanceSymbol(input) {
   let sym = input.toUpperCase().replace('/', '').replace('-', '');
-  if (!sym.endsWith('USDT') && !sym.endsWith('BTC') && !sym.endsWith('ETH')) {
-    sym += 'USDT';
-  }
+  // Cek apakah sudah berupa trading pair lengkap (misal ETHBTC, SOLUSDT)
+  // Bukan hanya base currency tunggal (BTC, ETH, SOL)
+  const hasQuoteCurrency =
+    sym.endsWith('USDT') ||
+    sym.endsWith('BUSD') ||
+    (sym.endsWith('BTC') && sym.length > 3) ||  // ETHBTC bukan BTC
+    (sym.endsWith('ETH') && sym.length > 3);    // BTCETH bukan ETH
+  if (!hasQuoteCurrency) sym += 'USDT';
   return sym;
 }
 
