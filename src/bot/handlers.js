@@ -18,6 +18,45 @@ import { runCoinScan } from '../utils/scanner.js';
 // ─────────────────────────────────────────────
 // Initialize bot
 // ─────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// resolveSymbol — map nama/alias coin ke simbol Binance
+// Juga handle typo umum dan coin dengan nama panjang
+// ─────────────────────────────────────────────
+function resolveSymbol(input) {
+  const clean = input.toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')  // hapus karakter non-alphanumeric
+    .replace(/USDT$/, '')       // strip USDT kalau sudah ada
+    .trim();
+
+  // Map nama populer → simbol Binance
+  const nameMap = {
+    // Nama lengkap umum
+    'BITCOIN': 'BTC', 'ETHEREUM': 'ETH', 'SOLANA': 'SOL',
+    'RIPPLE': 'XRP', 'CARDANO': 'ADA', 'DOGECOIN': 'DOGE',
+    'AVALANCHE': 'AVAX', 'POLKADOT': 'DOT', 'CHAINLINK': 'LINK',
+    'LITECOIN': 'LTC', 'UNISWAP': 'UNI', 'COSMOS': 'ATOM',
+    'NEARPROTOCOL': 'NEAR', 'NEAR': 'NEAR',
+    'SHIBA': 'SHIB', 'SHIBAINU': 'SHIB',
+    'PEPE': 'PEPE', 'FLOKI': 'FLOKI',
+    'TRON': 'TRX', 'STELLAR': 'XLM',
+    'POLYGON': 'POL', 'MATIC': 'POL',
+    'ARBITRUM': 'ARB', 'OPTIMISM': 'OP',
+    'APTOS': 'APT', 'SUI': 'SUI',
+    'INJECTIVE': 'INJ', 'SEI': 'SEI',
+    'HYPERLIQUID': 'HYPE', 'HYPE': 'HYPE',
+    // Meme coins
+    'FARTCOIN': 'FARTCOIN', 'WIF': 'WIF',
+    'DOGWIFHAT': 'WIF', 'BONK': 'BONK',
+    'POPCAT': 'POPCAT', 'MEW': 'MEW',
+    // Lainnya
+    'WORLDCOIN': 'WLD', 'RENDER': 'RENDER',
+    'FETCHAI': 'FET', 'FETCH': 'FET',
+    'TONCOIN': 'TON', 'TON': 'TON',
+  };
+
+  return nameMap[clean] || clean;
+}
+
 export function createBot() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) throw new Error('TELEGRAM_BOT_TOKEN not set in .env');
@@ -94,9 +133,13 @@ export function createBot() {
     });
 
     try {
+      const resolvedSymbol = resolveSymbol(symbol);
+      if (resolvedSymbol !== symbol) {
+        console.log(`[Bot] Symbol resolved: ${symbol} → ${resolvedSymbol}`);
+      }
       const [candles, ticker] = await Promise.all([
-        fetchBinanceKlines(symbol, timeframe, 200),
-        fetchBinanceTicker(symbol),
+        fetchBinanceKlines(resolvedSymbol, timeframe, 200),
+        fetchBinanceTicker(resolvedSymbol),
       ]);
 
       await editMessage(ctx, statusMsg, `🧮 Menghitung indikator...\n_RSI, MACD, EMA, Bollinger Bands..._`);
@@ -476,27 +519,71 @@ export function createBot() {
   });
 
   // ─────────────────────────────────────────────
-  // Free-text handler — natural language questions
+  // Free-text handler — natural language + smart routing
   // ─────────────────────────────────────────────
   bot.on('message:text', async (ctx) => {
     const text = ctx.message.text;
-
-    // Skip jika command
     if (text.startsWith('/')) return;
 
-    // Detect jika tanya tentang coin spesifik
-    const coinMatch = text.toUpperCase().match(/\b(BTC|ETH|SOL|BNB|XRP|ADA|DOGE|AVAX|MATIC|DOT|LINK|UNI|LTC|ATOM|NEAR)\b/);
+    // ── Coba detect pola "[COIN] [TIMEFRAME]" ──────
+    // contoh: "hype 4h", "fartcoin 1d", "BTC 1h cocok entry?"
+    const tfPattern = /\b(1m|3m|5m|15m|30m|1h|2h|4h|6h|8h|12h|1d|1w|daily|weekly)\b/i;
+    const tfMatch = text.match(tfPattern);
 
+    if (tfMatch) {
+      // Ada timeframe → coba ekstrak simbol coin dari teks
+      const beforeTF = text.slice(0, tfMatch.index).trim();
+      // Ambil kata terakhir sebelum timeframe sebagai kandidat simbol
+      const words = beforeTF.split(/\s+/);
+      const candidateSymbol = words[words.length - 1].toUpperCase();
+
+      if (candidateSymbol.length >= 2 && candidateSymbol.length <= 15) {
+        // Arahkan ke /analyze pipeline dengan data real
+        const timeframe = tfMatch[0].toLowerCase();
+        const statusMsg = await ctx.reply(
+          `🔍 Menganalisis *${candidateSymbol}* timeframe *${timeframe}*...`,
+          { parse_mode: 'Markdown' }
+        );
+        try {
+          const resolvedSymbol = resolveSymbol(candidateSymbol);
+          const [candles, ticker] = await Promise.all([
+            fetchBinanceKlines(resolvedSymbol, timeframe, 200),
+            fetchBinanceTicker(resolvedSymbol),
+          ]);
+          await editMessage(ctx, statusMsg, `🤖 AI menganalisis data real ${resolvedSymbol}...`);
+          const analysis = runFullAnalysis(candles, resolvedSymbol, timeframe);
+          const aiResponse = await analyzeSignal(analysis, '');
+          await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+          await ctx.reply(aiResponse, { parse_mode: 'Markdown' });
+          return;
+        } catch (err) {
+          await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+          // Kalau symbol tidak valid di Binance, fall through ke freeChat
+          if (!err.message.includes('Invalid symbol') && !err.message.includes('400')) {
+            await ctx.reply(`❌ Error: ${formatError(err)}`, { parse_mode: 'Markdown' });
+            return;
+          }
+          // Lanjut ke freeChat dengan pesan yang jelas
+        }
+      }
+    }
+
+    // ── Fallback: freeChat dengan konteks harga real ──
+    // Coba dapat harga real untuk coin yang disebut
+    const knownSymbols = text.toUpperCase().match(/\b([A-Z]{2,10})\b/g) || [];
     let context = '';
-    if (coinMatch) {
+    for (const sym of knownSymbols.slice(0, 3)) {
       try {
-        const ticker = await fetchBinanceTicker(coinMatch[0]);
-        context = `Harga ${coinMatch[0]} saat ini: $${formatPrice(ticker.price)}, 24h change: ${ticker.priceChangePct}%`;
-      } catch (e) { /* optional */ }
+        const ticker = await fetchBinanceTicker(sym);
+        context += `${sym} harga: $${formatPrice(ticker.price)}, 24h: ${ticker.priceChangePct}%\n`;
+      } catch (e) { /* coin tidak ada di binance, skip */ }
+    }
+
+    if (context) {
+      context = `Data market real-time:\n${context}\nGUNAKAN data di atas sebagai referensi harga. JANGAN gunakan harga yang kamu ketahui dari training data.`;
     }
 
     const typingMsg = await ctx.reply('💭 Sedang berpikir...');
-
     try {
       const response = await freeChat(text, context);
       await ctx.api.deleteMessage(ctx.chat.id, typingMsg.message_id).catch(() => {});
