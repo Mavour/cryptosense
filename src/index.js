@@ -56,36 +56,59 @@ async function broadcastToUsers(bot, message) {
 }
 
 // ─────────────────────────────────────────────
-// Auto-scan cron job
+// Auto-scan cron jobs
 // ─────────────────────────────────────────────
 function setupCronJobs(bot) {
   const scanHours = parseInt(process.env.SCAN_INTERVAL_HOURS) || 4;
 
-  // Scan tiap X jam (default 4 jam)
-  // Cron: setiap 4 jam di menit ke-0
-  const cronExpression = `0 */4 * * *`;
+  // Safe scan: setiap 4 jam di menit ke-0
+  const safeCron = `0 */${scanHours} * * *`;
+  console.log(`[Cron] Safe scan scheduled every ${scanHours} hours`);
 
-  console.log(`[Cron] Auto-scan scheduled every ${scanHours} hours`);
-
-  cron.schedule(cronExpression, async () => {
-    console.log('[Cron] Running scheduled coin scan...');
+  cron.schedule(safeCron, async () => {
+    console.log('[Cron] Running scheduled SAFE scan...');
 
     try {
-      const result = await runCoinScan(150);
+      const result = await runCoinScan(250, 'safe');
 
       if (result.picks.length === 0) {
-        console.log('[Cron] No significant picks found this scan');
+        console.log('[Cron] No safe picks found this scan');
         return;
       }
 
-      const header = `🤖 *AUTO-SCAN RESULT*\n_${new Date().toLocaleString('id-ID')}_\n\n`;
+      const header = `🔍 *AUTO-SCAN — SAFE MODE*\n_${new Date().toLocaleString('id-ID')}_\n\n`;
       const message = header + result.aiAnalysis;
 
       await broadcastToUsers(bot, message);
-      console.log(`[Cron] Scan complete. Sent ${result.picks.length} picks.`);
+      console.log(`[Cron] Safe scan complete. Sent ${result.picks.length} picks.`);
 
     } catch (err) {
-      console.error('[Cron] Scan failed:', err.message);
+      console.error('[Cron] Safe scan failed:', err.message);
+    }
+  });
+
+  // Hype scan: setiap 2 jam di menit ke-30 (offset biar gak tabrakan)
+  console.log(`[Cron] Hype scan scheduled every 2 hours`);
+
+  cron.schedule('30 */2 * * *', async () => {
+    console.log('[Cron] Running scheduled HYPE scan...');
+
+    try {
+      const result = await runCoinScan(250, 'hype');
+
+      if (result.picks.length === 0) {
+        console.log('[Cron] No hype picks found this scan');
+        return;
+      }
+
+      const header = `🔥 *AUTO-SCAN — HYPE MODE*\n_${new Date().toLocaleString('id-ID')}_\n\n`;
+      const message = header + result.aiAnalysis;
+
+      await broadcastToUsers(bot, message);
+      console.log(`[Cron] Hype scan complete. Sent ${result.picks.length} picks.`);
+
+    } catch (err) {
+      console.error('[Cron] Hype scan failed:', err.message);
     }
   });
 
@@ -167,7 +190,8 @@ async function main() {
     { command: 'analyze', description: '📊 Analisis lengkap TA + AI    |  /analyze ETH 4h' },
     { command: 'wave',    description: '🌊 Elliott Wave explanation     |  /wave SOL' },
     { command: 'news',    description: '📰 Analisis sentimen berita     |  /news BTC' },
-    { command: 'scan',    description: '🔍 Cari coin berpotensi naik sekarang' },
+    { command: 'scan',    description: '🔍 Cari coin oversold + bounce (safe mode)' },
+    { command: 'hype',    description: '🔥 Cari coin viral & momentum (agresif)' },
     { command: 'macro',   description: '🌍 Overview kondisi makro market' },
     { command: 'watch',   description: '👁 Tambah watchlist  |  /watch BTC ETH SOL' },
     { command: 'list',    description: '📋 Lihat watchlist + harga terkini' },

@@ -104,7 +104,8 @@ export function createBot() {
       `/wave SOL — Penjelasan Elliott Wave\n` +
       `/news BTC — Analisis berita + dampak harga\n\n` +
       `*Discovery:*\n` +
-      `/scan — Cari coin berpotensi naik\n\n` +
+      `/scan — Cari coin oversold + bounce (safe)\n` +
+      `/hype — Cari coin viral & momentum (agresif)\n\n` +
       `*Watchlist:*\n` +
       `/watch BTC ETH SOL — Tambah ke watchlist\n` +
       `/unwatch BTC — Hapus dari watchlist\n` +
@@ -115,7 +116,7 @@ export function createBot() {
       `/status — Status bot\n` +
       `/help — Tampilkan bantuan ini\n\n` +
       `💬 *Atau tanya langsung!*\n` +
-      `_"BTC kapan entry?"_ atau _"ETH aman beli sekarang?"_`,
+      `_*BTC kapan entry?*_ atau _*ETH aman beli sekarang?*_`,
       { parse_mode: 'Markdown' }
     );
   });
@@ -380,18 +381,18 @@ export function createBot() {
   });
 
   // ─────────────────────────────────────────────
-  // /scan — Coin discovery
+  // /scan — Safe coin discovery (mean reversion)
   // ─────────────────────────────────────────────
   bot.command('scan', async (ctx) => {
     const statusMsg = await ctx.reply(
       `🔍 *Menjalankan Coin Discovery Scan...*\n\n` +
-      `⏱️ Proses ini 30-90 detik (scan 150 coin)\n` +
+      `⏱️ Proses ini 30-90 detik (scan 250 coin)\n` +
       `📡 Fetching data dari CoinGecko + Binance...`,
       { parse_mode: 'Markdown' }
     );
 
     try {
-      const result = await runCoinScan(150);
+      const result = await runCoinScan(250, 'safe');
 
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
 
@@ -400,7 +401,7 @@ export function createBot() {
           `🔍 *Scan Selesai*\n\n` +
           `Tidak ada coin yang memenuhi kriteria ketat saat ini.\n` +
           `Market mungkin sedang sideways atau low volatility.\n\n` +
-          `_Coba lagi dalam 2-4 jam._`,
+          `_Coba /hype untuk scan momentum yang lebih agresif._`,
           { parse_mode: 'Markdown' }
         );
         return;
@@ -415,6 +416,45 @@ export function createBot() {
     } catch (err) {
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
       await ctx.reply(`❌ Scan gagal: ${formatError(err)}`, { parse_mode: 'Markdown' });
+    }
+  });
+
+  // ─────────────────────────────────────────────
+  // /hype — Hype/Momentum scanner (aggressive)
+  // ─────────────────────────────────────────────
+  bot.command('hype', async (ctx) => {
+    const statusMsg = await ctx.reply(
+      `🔥 *Menjalankan HYPE SCAN...*\n\n` +
+      `🚀 Mencari coin yang sedang viral & momentum\n` +
+      `📡 Fetching trending + top gainers + volume anomaly...`,
+      { parse_mode: 'Markdown' }
+    );
+
+    try {
+      const result = await runCoinScan(250, 'hype');
+
+      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+
+      if (result.picks.length === 0) {
+        await ctx.reply(
+          `🔥 *Hype Scan Selesai*\n\n` +
+          `Tidak ada coin hype yang terdeteksi saat ini.\n` +
+          `Market sedang tenang, tidak ada narrative dominan.\n\n` +
+          `_Coba lagi dalam 1-2 jam._`,
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
+
+      await ctx.reply(result.aiAnalysis, { parse_mode: 'Markdown' });
+      await ctx.reply(
+        `_🔥 Hype scan selesai dalam ${(result.duration / 1000).toFixed(1)}s | ${result.scannedCount} coin dianalisis_`,
+        { parse_mode: 'Markdown' }
+      );
+
+    } catch (err) {
+      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+      await ctx.reply(`❌ Hype scan gagal: ${formatError(err)}`, { parse_mode: 'Markdown' });
     }
   });
 

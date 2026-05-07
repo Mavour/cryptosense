@@ -349,16 +349,56 @@ Berikan analisis dengan format:
 // ─────────────────────────────────────────────
 // PROMPT BUILDER — Coin Discovery Scoring
 // ─────────────────────────────────────────────
-function buildDiscoveryPrompt(coinData) {
-  const coinList = coinData.map(c =>
-    `• ${c.symbol} | Price: $${c.price} | 24h: ${c.change24h}% | Volume spike: ${c.volumeSpike}x | RSI: ${c.rsi} | News: ${c.newsScore}`
-  ).join('\n');
+function buildDiscoveryPrompt(coinData, mode = 'safe') {
+  const isHype = mode === 'hype';
+  const coinList = coinData.map(c => {
+    let line = `• ${c.symbol} | Price: $${c.price} | 1h: ${c.change1h}% | 24h: ${c.change24h}% | Vol spike: ${c.volumeSpike}x | RSI: ${c.rsi}`;
+    if (c.trendingRank) line += ` | 🔥 Trending #${c.trendingRank}`;
+    if (c.isBreakout) line += ` | 🚀 Breakout`;
+    if (c.isGainer) line += ` | 📈 Top Gainer`;
+    line += ` | News: ${c.newsScore}`;
+    return line;
+  }).join('\n');
+
+  if (isHype) {
+    return `Kamu adalah *HYPE HUNTER* — trader momentum yang fokus mencari coin yang sedang VIRAL dan punya potensi pump dalam 6-24 jam ke depan.
+
+Data coin yang terdeteksi:
+${coinList}
+
+Kriteria seleksi HYPE MODE:
+- PRIORITAS #1: Coin yang sedang trending / viral (ada 🔥 Trending atau 📈 Top Gainer)
+- Volume anomaly TINGGI (>2x rata-rata) — tanda whale/smart money masuk
+- Momentum kuat: change 1h positif dan change 24h positif (bukan dead cat bounce)
+- Breakout dari resistance = SINYAL PALING KUAT
+- RSI 55-80 = momentum sehat (bukan oversold). RSI > 80 = super hot tapi waspapi profit-taking
+- Jangan takut overbought — coin hype BUKAN untuk "beli murah", tapi untuk "ride the wave"
+
+Format output AGRESIF dan SPESIFIK:
+
+**🔥 HYPE SCAN — TOP MOMENTUM PICKS**
+_|timestamp|_\n\n
+
+Untuk setiap coin (maksimal 5, minimal 3):
+**|RANK|. |SYMBOL| — Score |SCORE|/10 |emoji|**
+• **Narrative / Hype:** [apa yang bikin coin ini hot sekarang? narrative, news, event, atau trend apa?]
+• **Setup:** [kondisi teknikal: breakout? momentum? volume spike? EMA alignment?]
+• **Entry Zone:** $[range] — [penjelasan kenapa zone ini]
+• **Target:** $[level] (+[%]) — [kenapa target ini realistis berdasarkan resistance/SR]
+• **Invalidation / Stop:** $[level] — [level apa yang membatalkan thesis hype ini]
+• **Risk:** [HIGH/MEDIUM/LOW] — [alasan spesifik, contoh: "HIGH — sudah naik 40% dalam 24h, bisa dump kapan saja"]
+
+**📊 Market Pulse:** [1-2 kalimat: apa yang sedang hot di market? narrative apa yang dominan?]
+
+**⚠️ HYPE DISCLAIMER:**
+Coin hype = high risk high reward. Jangan FOMO all-in. Gunakan position sizing kecil (1-3% portfolio per trade). Siap cut loss CEPAT jika momentum jebol.`;
+  }
 
   return `Kamu adalah coin screener expert. Dari daftar berikut, pilih 3-5 coin yang paling berpotensi untuk SCALPING SPOT dalam 24-48 jam ke depan:
 
 ${coinList}
 
-Kriteria seleksi:
+Kriteria seleksi SAFE MODE:
 - Volume spike tinggi (>2x) dengan arah bullish
 - RSI bounce dari oversold (20-45) atau momentum RSI naik
 - Sentimen berita positif
@@ -367,6 +407,7 @@ Kriteria seleksi:
 Format output:
 
 **🔍 COIN DISCOVERY — TOP PICKS**
+_|timestamp|_\n\n
 
 Untuk setiap coin yang dipilih:
 **[RANK]. [SYMBOL] — [SCORE]/10**
@@ -540,12 +581,12 @@ export async function analyzeNews(symbol, newsItems, ticker) {
   ], 700);
 }
 
-export async function scoreDiscoveredCoins(coinData) {
-  const prompt = buildDiscoveryPrompt(coinData);
+export async function scoreDiscoveredCoins(coinData, mode = 'safe') {
+  const prompt = buildDiscoveryPrompt(coinData, mode);
   return await callAI([
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user', content: prompt },
-  ], 1000);
+  ], 1200);
 }
 
 export async function analyzeMacro(macroData) {

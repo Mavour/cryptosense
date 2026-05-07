@@ -84,9 +84,12 @@ function normalizeTimeframe(input) {
 
 // ─────────────────────────────────────────────
 // BINANCE — Endpoint list (fallback jika satu diblok)
-// api.binance.com diblok di Indonesia — coba api1/2/3/4 dulu
+// api.binance.com sering diblok di Indonesia — coba alternatif dulu
 // ─────────────────────────────────────────────
 const BINANCE_ENDPOINTS = [
+  'https://data-api.binance.vision',   // Public data API, paling stabil
+  'https://api.binance.me',             // Mirror alternatif
+  'https://api.binance.us',             // US mirror (bisa work dari beberapa region)
   'https://api1.binance.com',
   'https://api2.binance.com',
   'https://api3.binance.com',
@@ -98,11 +101,14 @@ async function binanceGet(path, params) {
   let lastError;
   for (const base of BINANCE_ENDPOINTS) {
     try {
-      const res = await axios.get(`${base}${path}`, { params, timeout: 12000 });
+      const res = await axios.get(`${base}${path}`, { params, timeout: 8000 });
       return res.data;
     } catch (err) {
       lastError = err;
-      console.warn(`[MarketData] ${base} failed (${err.message}) — trying next...`);
+      // Hanya log jika bukan timeout biasa (terlalu noisy)
+      if (!err.message.includes('timeout')) {
+        console.warn(`[MarketData] ${base} failed (${err.message}) — trying next...`);
+      }
     }
   }
   throw lastError;
@@ -277,13 +283,68 @@ export async function fetchTrendingCoins() {
     return res.data;
   });
 
-  const result = data.coins.slice(0, 7).map(c => ({
+  const result = data.coins.slice(0, 15).map(c => ({
     id: c.item.id,
     name: c.item.name,
     symbol: c.item.symbol.toUpperCase(),
     marketCapRank: c.item.market_cap_rank,
     priceBtc: c.item.price_btc,
     score: c.item.score,
+  }));
+
+  setCache(cacheKey, result);
+  return result;
+}
+
+// ─────────────────────────────────────────────
+// COINGECKO — Top Gainers (1h / 24h momentum)
+// ─────────────────────────────────────────────
+export async function fetchTopGainers(timeframe = '24h', limit = 50) {
+  const cacheKey = `top-gainers:${timeframe}:${limit}`;
+  const cached = getCached(cacheKey);
+  if (cached) return cached;
+
+  const headers = {};
+  if (process.env.COINGECKO_API_KEY) {
+    headers['x-cg-demo-api-key'] = process.env.COINGECKO_API_KEY;
+  }
+
+  const data = await fetchWithRetry(async () => {
+    const res = await axios.get('https://api.coingecko.com/api/v3/coins/markets', {
+      params: {
+        vs_currency: 'usd',
+        order: 'market_cap_desc',
+        per_page: 250,
+        page: 1,
+        sparkline: false,
+        price_change_percentage: '1h,24h,7d',
+      },
+      headers,
+      timeout: 15000,
+    });
+    return res.data;
+  });
+
+  // Sort by specific timeframe change descending
+  const sortKey = timeframe === '1h' ? 'price_change_percentage_1h_in_currency' : 'price_change_percentage_24h';
+  const sorted = data
+    .filter(c => c.total_volume > 1_000_000) // min $1M volume
+    .sort((a, b) => (b[sortKey] || 0) - (a[sortKey] || 0))
+    .slice(0, limit);
+
+  const result = sorted.map(c => ({
+    id: c.id,
+    symbol: c.symbol.toUpperCase(),
+    name: c.name,
+    price: c.current_price,
+    change1h: c.price_change_percentage_1h_in_currency || 0,
+    change24h: c.price_change_percentage_24h || 0,
+    change7d: c.price_change_percentage_7d_in_currency || 0,
+    volume24h: c.total_volume,
+    marketCap: c.market_cap,
+    marketCapRank: c.market_cap_rank,
+    high24h: c.high_24h,
+    low24h: c.low_24h,
   }));
 
   setCache(cacheKey, result);
@@ -334,7 +395,8 @@ export async function fetchCryptoNews(currencies = [], filter = 'hot') {
     return res.data;
   });
 
-  const result = (data.Data || []).slice(0, 10).map(item => ({
+  const rawNews = Array.isArray(data.Data) ? data.Data : [];
+  const result = rawNews.slice(0, 10).map(item => ({
     title: item.title,
     url: item.url,
     source: item.source_info?.name || item.source || 'Unknown',
