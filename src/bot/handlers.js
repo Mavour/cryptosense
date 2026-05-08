@@ -3,15 +3,14 @@
  * CRYPTOSENSE BOT — Telegram Bot Handlers
  * =============================================
  * Framework: Grammy
- * Commands: /start /analyze /signal /wave /news /watch /unwatch /list /scan /macro /status /help
+ * Commands: /start /analyze /signal /news /watch /unwatch /list /scan /hype /early /status /help
  */
 
-import { Bot, InlineKeyboard } from 'grammy';
+import { Bot } from 'grammy';
 import axios from 'axios';
-import { fetchBinanceKlines, fetchBinanceTicker, fetchCryptoNews,
-         fetchFearGreedIndex, fetchBTCDominance, fetchTrendingCoins, formatPrice } from '../ta/marketData.js';
+import { fetchBinanceKlines, fetchBinanceTicker, fetchCryptoNews, formatPrice } from '../ta/marketData.js';
 import { runFullAnalysis } from '../ta/indicators.js';
-import { analyzeSignal, analyzeElliottWave, analyzeNews, analyzeMacro, freeChat, analyzeChartImage } from '../ai/analyzer.js';
+import { analyzeSignal, analyzeNews, freeChat, analyzeChartImage } from '../ai/analyzer.js';
 import { addToWatchlist, removeFromWatchlist, getWatchlist, upsertUser, getStats } from '../utils/database.js';
 import { runCoinScan } from '../utils/scanner.js';
 
@@ -82,10 +81,8 @@ export function createBot() {
       `🎯 *Yang bisa aku bantu:*\n` +
       `• Analisis teknikal real-time (RSI, EMA, MACD)\n` +
       `• Sinyal beli/jual dengan SL & TP\n` +
-      `• Elliott Wave explanation\n` +
       `• Analisis sentimen berita\n` +
-      `• Coin discovery scan otomatis\n` +
-      `• Macro market overview\n\n` +
+      `• Coin discovery: Safe, Hype, & Early\n\n` +
       `📖 Ketik /help untuk melihat semua command\n\n` +
       `_⚠️ Disclaimer: Ini bukan financial advice. Selalu manage risiko kamu sendiri._`,
       { parse_mode: 'Markdown' }
@@ -101,17 +98,15 @@ export function createBot() {
       `*Analisis:*\n` +
       `/analyze BTC 4h — Analisis lengkap + sinyal\n` +
       `/signal ETH — Sinyal cepat beli/jual + SL/TP\n` +
-      `/wave SOL — Penjelasan Elliott Wave\n` +
       `/news BTC — Analisis berita + dampak harga\n\n` +
       `*Discovery:*\n` +
-      `/scan — Cari coin oversold + bounce (safe)\n` +
-      `/hype — Cari coin viral & momentum (agresif)\n\n` +
+      `/early — Deteksi akumulasi sebelum pump\n` +
+      `/hype — Cari coin viral & momentum\n` +
+      `/scan — Cari coin oversold + bounce (safe)\n\n` +
       `*Watchlist:*\n` +
       `/watch BTC ETH SOL — Tambah ke watchlist\n` +
       `/unwatch BTC — Hapus dari watchlist\n` +
       `/list — Lihat watchlist kamu\n\n` +
-      `*Market:*\n` +
-      `/macro — Overview kondisi makro market\n\n` +
       `*Lainnya:*\n` +
       `/status — Status bot\n` +
       `/help — Tampilkan bantuan ini\n\n` +
@@ -158,21 +153,12 @@ export function createBot() {
         }
       } catch (e) { /* news optional */ }
 
-      await editMessage(ctx, statusMsg, `🤖 AI sedang menganalisis...\n_Elliott Wave, SMC, Risk Management..._`);
+      await editMessage(ctx, statusMsg, `🤖 AI sedang menganalisis...\n_SMC, Risk Management, Order Flow..._`);
 
       const aiResponse = await analyzeSignal(analysis, newsContext);
 
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
       await ctx.reply(aiResponse, { parse_mode: 'Markdown' });
-
-      // Send quick summary keyboard
-      const kb = new InlineKeyboard()
-        .text(`🌊 Elliott Wave`, `wave_${symbol}_${timeframe}`)
-        .text(`📰 Berita`, `news_${symbol}`);
-      await ctx.reply(`_Quick actions untuk ${symbol}:_`, {
-        parse_mode: 'Markdown',
-        reply_markup: kb,
-      });
 
     } catch (err) {
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
@@ -223,33 +209,6 @@ export function createBot() {
 
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
       await ctx.reply(msg, { parse_mode: 'Markdown' });
-
-    } catch (err) {
-      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-      await ctx.reply(`❌ *Error:* ${formatError(err)}`, { parse_mode: 'Markdown' });
-    }
-  });
-
-  // ─────────────────────────────────────────────
-  // /wave [SYMBOL] [TIMEFRAME] — Elliott Wave
-  // ─────────────────────────────────────────────
-  bot.command('wave', async (ctx) => {
-    const args = ctx.message?.text?.split(' ').slice(1) || [];
-    const symbol = args[0]?.toUpperCase() || 'BTC';
-    const timeframe = args[1] || '4h';
-
-    const statusMsg = await ctx.reply(`🌊 Menganalisis Elliott Wave *${symbol}*...`, { parse_mode: 'Markdown' });
-
-    try {
-      const candles = await fetchBinanceKlines(symbol, timeframe, 200);
-      const analysis = runFullAnalysis(candles, symbol, timeframe);
-
-      await editMessage(ctx, statusMsg, `🤖 AI merumuskan wave count...`);
-
-      const waveAnalysis = await analyzeElliottWave(analysis);
-
-      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-      await ctx.reply(waveAnalysis, { parse_mode: 'Markdown' });
 
     } catch (err) {
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
@@ -459,41 +418,41 @@ export function createBot() {
   });
 
   // ─────────────────────────────────────────────
-  // /macro — Macro market overview
+  // /early — Whale Watch: pre-pump accumulation
   // ─────────────────────────────────────────────
-  bot.command('macro', async (ctx) => {
-    const statusMsg = await ctx.reply(`🌍 Mengambil data makro...`, { parse_mode: 'Markdown' });
+  bot.command('early', async (ctx) => {
+    const statusMsg = await ctx.reply(
+      `🕵️ *Menjalankan WHALE WATCH...*\n\n` +
+      `🔍 Mencari jejak akumulasi sebelum pump\n` +
+      `📡 Scanning volume anomaly + flat price + BB squeeze...`,
+      { parse_mode: 'Markdown' }
+    );
 
     try {
-      const [fearGreed, btcGlobal, trending, btcTicker, ethTicker] = await Promise.all([
-        fetchFearGreedIndex(),
-        fetchBTCDominance(),
-        fetchTrendingCoins(),
-        fetchBinanceTicker('BTC'),
-        fetchBinanceTicker('ETH'),
-      ]);
-
-      const macroData = {
-        fearGreed,
-        btcDominance: btcGlobal.btcDominance,
-        totalMarketCap: btcGlobal.totalMarketCap,
-        totalVolume24h: btcGlobal.totalVolume24h,
-        marketCapChangePercent: btcGlobal.marketCapChangePercent,
-        btcChange: btcTicker.priceChangePct,
-        ethChange: ethTicker.priceChangePct,
-        trending,
-      };
-
-      await editMessage(ctx, statusMsg, `🤖 AI menganalisis kondisi makro...`);
-
-      const macroAnalysis = await analyzeMacro(macroData);
+      const result = await runCoinScan(250, 'early');
 
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-      await ctx.reply(macroAnalysis, { parse_mode: 'Markdown' });
+
+      if (result.picks.length === 0) {
+        await ctx.reply(
+          `🕵️ *Whale Watch Selesai*\n\n` +
+          `Tidak ada jejak akumulasi yang terdeteksi saat ini.\n` +
+          `Market sedang tenang, tidak ada setup pre-pump.\n\n` +
+          `_Coba /hype untuk scan momentum, atau tunggu 1 jam._`,
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
+
+      await ctx.reply(result.aiAnalysis, { parse_mode: 'Markdown' });
+      await ctx.reply(
+        `_🕵️ Whale Watch selesai dalam ${(result.duration / 1000).toFixed(1)}s | ${result.scannedCount} coin dianalisis_`,
+        { parse_mode: 'Markdown' }
+      );
 
     } catch (err) {
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-      await ctx.reply(`❌ Error: ${formatError(err)}`, { parse_mode: 'Markdown' });
+      await ctx.reply(`❌ Whale Watch gagal: ${formatError(err)}`, { parse_mode: 'Markdown' });
     }
   });
 
@@ -517,45 +476,6 @@ export function createBot() {
       `*Node.js:* ${process.version}`,
       { parse_mode: 'Markdown' }
     );
-  });
-
-  // ─────────────────────────────────────────────
-  // Inline keyboard callbacks
-  // ─────────────────────────────────────────────
-  bot.callbackQuery(/^wave_(.+)_(.+)$/, async (ctx) => {
-    const [, symbol, timeframe] = ctx.match;
-    await ctx.answerCallbackQuery('Menganalisis Elliott Wave...');
-
-    try {
-      const candles = await fetchBinanceKlines(symbol, timeframe, 200);
-      const analysis = runFullAnalysis(candles, symbol, timeframe);
-      const waveAnalysis = await analyzeElliottWave(analysis);
-      await ctx.reply(waveAnalysis, { parse_mode: 'Markdown' });
-    } catch (err) {
-      await ctx.reply(`❌ Error: ${formatError(err)}`, { parse_mode: 'Markdown' });
-    }
-  });
-
-  bot.callbackQuery(/^news_(.+)$/, async (ctx) => {
-    const [, symbol] = ctx.match;
-    await ctx.answerCallbackQuery('Mengambil berita...');
-
-    try {
-      const [newsItems, ticker] = await Promise.all([
-        fetchCryptoNews([symbol], 'hot'),
-        fetchBinanceTicker(symbol),
-      ]);
-
-      if (!newsItems.length) {
-        await ctx.reply(`📭 Tidak ada berita terbaru untuk ${symbol}.`);
-        return;
-      }
-
-      const newsAnalysis = await analyzeNews(symbol, newsItems, ticker);
-      await ctx.reply(newsAnalysis, { parse_mode: 'Markdown' });
-    } catch (err) {
-      await ctx.reply(`❌ Error: ${formatError(err)}`, { parse_mode: 'Markdown' });
-    }
   });
 
   // ─────────────────────────────────────────────

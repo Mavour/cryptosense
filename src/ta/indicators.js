@@ -126,6 +126,35 @@ export function calculateBollingerBands(closes, period = 20, multiplier = 2) {
 }
 
 // ─────────────────────────────────────────────
+// Bollinger Bands Squeeze Detection
+// BB squeeze = bandwidth menyempit → volatilitas compression
+// Biasanya diikuti oleh explosive move (volatility expansion)
+// ─────────────────────────────────────────────
+export function detectBBSqueeze(candles, bbPeriod = 20, lookback = 10, squeezeThreshold = 4.0) {
+  if (candles.length < bbPeriod + lookback) return { isSqueeze: false, bandwidth: null, avgBandwidth: null };
+
+  const closes = candles.map(c => parseFloat(c.close));
+  const bb = calculateBollingerBands(closes, bbPeriod);
+
+  if (bb.bandwidth.length < lookback + 1) return { isSqueeze: false, bandwidth: null, avgBandwidth: null };
+
+  const currentBandwidth = bb.bandwidth[bb.bandwidth.length - 1];
+  const recentBandwidths = bb.bandwidth.slice(-lookback - 1, -1);
+  const avgBandwidth = recentBandwidths.reduce((a, b) => a + b, 0) / recentBandwidths.length;
+
+  // Squeeze = bandwidth saat ini < threshold absolute
+  // ATAU bandwidth saat ini < 40% dari rata-rata recent (compression)
+  const isSqueeze = currentBandwidth < squeezeThreshold || currentBandwidth < avgBandwidth * 0.6;
+
+  return {
+    isSqueeze,
+    bandwidth: parseFloat(currentBandwidth.toFixed(3)),
+    avgBandwidth: parseFloat(avgBandwidth.toFixed(3)),
+    compressionRatio: avgBandwidth > 0 ? parseFloat((currentBandwidth / avgBandwidth).toFixed(2)) : 1,
+  };
+}
+
+// ─────────────────────────────────────────────
 // Volume Spike Detection
 // Returns: { avgVolume, currentVolume, spikeRatio, isSpike, direction }
 // ─────────────────────────────────────────────

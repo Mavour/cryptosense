@@ -426,6 +426,121 @@ export function formatPrice(price) {
 }
 
 // ─────────────────────────────────────────────
+// BINANCE — Funding Rate (Futures) — gratis, public
+// Deteksi short squeeze potential: funding negatif + harga flat
+// ─────────────────────────────────────────────
+export async function fetchFundingRate(symbol) {
+  const binanceSymbol = normalizeBinanceSymbol(symbol);
+  const cacheKey = `funding:${binanceSymbol}`;
+
+  const cached = getCached(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const data = await binanceGet('/fapi/v1/fundingRate', {
+      symbol: binanceSymbol,
+      limit: 1,
+    });
+
+    if (!data || data.length === 0) return null;
+
+    const result = {
+      symbol: data[0].symbol,
+      fundingRate: parseFloat(data[0].fundingRate),
+      fundingTime: data[0].fundingTime,
+    };
+
+    setCache(cacheKey, result);
+    return result;
+  } catch (e) {
+    // Coin mungkin gak ada pair futures
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────
+// BINANCE — Order Book Depth (bid/ask ratio)
+// Hanya untuk top kandidat, gak semua coin
+// ─────────────────────────────────────────────
+export async function fetchBinanceDepth(symbol, limit = 50) {
+  const binanceSymbol = normalizeBinanceSymbol(symbol);
+
+  try {
+    const data = await binanceGet('/api/v3/depth', {
+      symbol: binanceSymbol,
+      limit,
+    });
+
+    const bidVol = data.bids.reduce((sum, b) => sum + parseFloat(b[1]), 0);
+    const askVol = data.asks.reduce((sum, a) => sum + parseFloat(a[1]), 0);
+
+    return {
+      symbol: binanceSymbol,
+      bidVolume: bidVol,
+      askVolume: askVol,
+      bidAskRatio: askVol > 0 ? parseFloat((bidVol / askVol).toFixed(2)) : 1,
+      spreadPct: parseFloat(((parseFloat(data.asks[0][0]) - parseFloat(data.bids[0][0])) / parseFloat(data.bids[0][0]) * 100).toFixed(4)),
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────
+// COINMARKETCAL — Scrape event calendar (upcoming catalysts)
+// Gratis, gak perlu API key. Scrape halaman search per coin.
+// Cache 3 jam biar gak terlalu sering hit.
+// ─────────────────────────────────────────────
+export async function scrapeCoinMarketCal(symbol) {
+  const cacheKey = `cmc-events:${symbol.toUpperCase()}`;
+  const cached = getCached(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const res = await axios.get('https://coinmarketcal.com/en/', {
+      params: {
+        form: {
+          date_range: 7,
+          coin: symbol.toUpperCase(),
+        },
+      },
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html',
+      },
+      timeout: 8000,
+    });
+
+    const html = res.data;
+    // Simple regex extraction — cari event cards
+    const eventMatches = html.match(/<article[^>]*class="[^"]*card[^"]*"[^>]*>[\s\S]*?<\/article>/gi) || [];
+
+    const events = eventMatches.slice(0, 3).map(card => {
+      const titleMatch = card.match(/<h5[^>]*>([\s\S]*?)<\/h5>/i);
+      const dateMatch = card.match(/(\d{1,2}\s+\w+\s+\d{4})/i);
+      const confMatch = card.match(/(\d+)%/);
+      return {
+        title: titleMatch ? titleMatch[1].replace(/<[^>]+>/g, '').trim() : 'Unknown event',
+        date: dateMatch ? dateMatch[1] : null,
+        confidence: confMatch ? parseInt(confMatch[1]) : 0,
+      };
+    }).filter(e => e.title !== 'Unknown event');
+
+    const result = {
+      symbol: symbol.toUpperCase(),
+      events,
+      hasEvent: events.length > 0,
+    };
+
+    setCache(cacheKey, result);
+    return result;
+  } catch (e) {
+    // Scrape bisa gagal karena Cloudflare — fallback kosong
+    return { symbol: symbol.toUpperCase(), events: [], hasEvent: false };
+  }
+}
+
+// ─────────────────────────────────────────────
 // Cache stats (untuk debugging)
 // ─────────────────────────────────────────────
 export function getCacheStats() {

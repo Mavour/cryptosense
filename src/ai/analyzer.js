@@ -219,47 +219,6 @@ Berikan analisis komprehensif dengan format:
 }
 
 // ─────────────────────────────────────────────
-// PROMPT BUILDER — Elliott Wave Explanation
-// ─────────────────────────────────────────────
-function buildWavePrompt(analysis) {
-  const { symbol, timeframe, currentPrice, supportResistance, fibonacci } = analysis;
-
-  return `Jelaskan struktur Elliott Wave untuk ${symbol} di timeframe ${timeframe}:
-
-Data harga:
-• Current Price: $${currentPrice}
-• Recent Swing Highs (Resistance): ${supportResistance.resistances.join(', ') || 'N/A'}
-• Recent Swing Lows (Support): ${supportResistance.supports.join(', ') || 'N/A'}
-• Fibonacci High: $${fibonacci.high}
-• Fibonacci Low: $${fibonacci.low}
-• Trend: ${fibonacci.trend}
-• Key Fib Levels: 
-  - 23.6%: $${fibonacci.levels['23.6%']}
-  - 38.2%: $${fibonacci.levels['38.2%']}
-  - 50.0%: $${fibonacci.levels['50.0%']}
-  - 61.8%: $${fibonacci.levels['61.8%']}
-  - 78.6%: $${fibonacci.levels['78.6%']}
-
-Berikan penjelasan dengan format:
-
-**🌊 ELLIOTT WAVE ANALYSIS — ${symbol} ${timeframe.toUpperCase()}**
-
-**Identifikasi Wave Saat Ini:**
-[Berdasarkan data swing dan harga, tebak/identifikasi kita sedang di wave mana. Jelaskan reasoning-nya berdasarkan level Fibonacci dan posisi harga terhadap swing high/low]
-
-**Skenario Bullish (Impulsive):**
-[Jika ini wave koreksi, jelaskan target wave naik berikutnya]
-
-**Skenario Bearish (Corrective):**
-[Jika ini wave naik, jelaskan potensi koreksi ke mana]
-
-**Invalidation Level:**
-[Level harga yang membatalkan analisis wave ini]
-
-**Catatan:** Elliott Wave bersifat subjektif. Gunakan sebagai guidance, bukan kepastian.`;
-}
-
-// ─────────────────────────────────────────────
 // SENTIMENT ENRICHER — Analisis sentimen judul berita via AI
 // Dipanggil sebelum buildNewsPrompt karena CryptoCompare
 // tidak menyediakan skor sentimen (berbeda dari sumber berbayar).
@@ -351,14 +310,61 @@ Berikan analisis dengan format:
 // ─────────────────────────────────────────────
 function buildDiscoveryPrompt(coinData, mode = 'safe') {
   const isHype = mode === 'hype';
+  const isEarly = mode === 'early';
+
   const coinList = coinData.map(c => {
     let line = `• ${c.symbol} | Price: $${c.price} | 1h: ${c.change1h}% | 24h: ${c.change24h}% | Vol spike: ${c.volumeSpike}x | RSI: ${c.rsi}`;
-    if (c.trendingRank) line += ` | 🔥 Trending #${c.trendingRank}`;
-    if (c.isBreakout) line += ` | 🚀 Breakout`;
-    if (c.isGainer) line += ` | 📈 Top Gainer`;
+    if (isEarly) {
+      if (c.bbSqueeze) line += ` | 🌀 BB Squeeze`;
+      if (c.fundingRate !== null && c.fundingRate < 0) line += ` | 📉 Funding ${(c.fundingRate * 100).toFixed(4)}%`;
+      if (c.hasEvent) line += ` | 📅 Event: ${c.eventTitle?.slice(0, 40)}`;
+      if (c.bidAskRatio) line += ` | ⚖️ Bid/Ask ${c.bidAskRatio}`;
+    }
+    if (isHype) {
+      if (c.trendingRank) line += ` | 🔥 Trending #${c.trendingRank}`;
+      if (c.isBreakout) line += ` | 🚀 Breakout`;
+      if (c.isGainer) line += ` | 📈 Top Gainer`;
+    }
     line += ` | News: ${c.newsScore}`;
     return line;
   }).join('\n');
+
+  if (isEarly) {
+    return `Kamu adalah *WHALE ANALYST* — detektif yang membaca footprint smart money SEBELUM harga naik. 
+Kamu bukan pengejar momentum, kamu adalah pemburu akumulasi diam-diam.
+
+DATA COIN YANG TERDETEKSI:
+${coinList}
+
+Kriteria seleksi EARLY MODE (deteksi dini):
+- UTAMA: Volume spike TINGGI (>2.5x) tapi harga FLAT atau hampir flat (<2% change 1h). Ini = hidden accumulation.
+- BB Squeeze (bandwidth <4%) = "spring loaded", volatilitas compression sebelum explosive move.
+- RSI 45-58 + volume expansion = energy sedang dibangun, belum meledak.
+- 4H EMA20 > EMA50 = higher timeframe trend healthy, fondasi kuat.
+- Funding rate negatif = banyak short, potensi short squeeze.
+- Event upcoming dalam 7 hari = catalyst yang bisa trigger breakout.
+- JANGAN rekomendasikan coin yang sudah naik >8% dalam 24 jam. Itu sudah late.
+
+Format output WHALE WATCH:
+
+**🕵️ WHALE WATCH — EARLY ACCUMULATION**
+_|timestamp|_\n\n
+
+Untuk setiap coin (maksimal 5, minimal 3):
+**|RANK|. |SYMBOL| — Score |SCORE|/10 |emoji|**
+• **Footprint:** [apa yang whale lakukan? volume besar tapi harga diam? absorption? BB squeeze?]
+• **Setup:** [kondisi teknikal: BB squeeze? EMA alignment? hidden accumulation? consolidation?]
+• **Catalyst:** [ada event upcoming? funding negatif? narrative apa?]
+• **Entry Zone:** $[range] — [zona akumulasi SAAT INI, bukan chase naik]
+• **Invalidation / Stop:** $[level] — [di bawah support akumulasi, thesis batal]
+• **Timeline:** [6-48 jam] — [kapan perkiraan breakout]
+• **Risk:** [MEDIUM/HIGH] — ["bisa flat 1-3 hari" / "whale belum kelar accumulate"]
+
+**📊 Market Pulse:** [1-2 kalimat: apa yang sedang diam-diam diakumulasi? sector/narrative apa?]
+
+**⚠️ WHALE DISCLAIMER:**
+Ini DETEKSI DINI, bukan sinyal konfirmasi. Harga bisa flat 1-3 hari. Gunakan LIMIT ORDER, jangan market buy. Sabar. Whale gak buru-buru.`;
+  }
 
   if (isHype) {
     return `Kamu adalah *HYPE HUNTER* — trader momentum yang fokus mencari coin yang sedang VIRAL dan punya potensi pump dalam 6-24 jam ke depan.
@@ -420,43 +426,6 @@ Untuk setiap coin yang dipilih:
 **📊 Summary:** [1-2 kalimat overview market condition]
 
 ⚠️ Disclaimer: Rekomendasi berdasarkan data snapshot. Selalu cek chart sendiri sebelum entry.`;
-}
-
-// ─────────────────────────────────────────────
-// PROMPT BUILDER — Macro Overview
-// ─────────────────────────────────────────────
-function buildMacroPrompt(macroData) {
-  return `Berikan ringkasan kondisi makro crypto berdasarkan data berikut:
-
-Fear & Greed Index: ${macroData.fearGreed.value} (${macroData.fearGreed.label})
-BTC Dominance: ${macroData.btcDominance}%
-Total Market Cap: $${(macroData.totalMarketCap / 1e12).toFixed(2)}T
-Market Cap Change 24h: ${macroData.marketCapChangePercent}%
-Total Volume 24h: $${(macroData.totalVolume24h / 1e9).toFixed(2)}B
-
-BTC 24h Change: ${macroData.btcChange}%
-ETH 24h Change: ${macroData.ethChange}%
-
-Trending Coins: ${macroData.trending.map(c => c.symbol).join(', ')}
-
-Format output:
-
-**🌍 MACRO OVERVIEW**
-
-**Kondisi Market Saat Ini:**
-[Apakah risk-on atau risk-off, bagaimana sentimen keseluruhan]
-
-**BTC Dominance Analysis:**
-[Apa arti dominance level ini — apakah altcoin season atau BTC season]
-
-**Fear & Greed Interpretation:**
-[Apa artinya untuk trader jangka pendek]
-
-**Strategi Umum:**
-[Berdasarkan makro, bagaimana pendekatan trading yang direkomendasikan]
-
-**Coins to Watch:**
-[Dari trending coins, mana yang menarik secara teknikal]`;
 }
 
 // ─────────────────────────────────────────────
@@ -560,14 +529,6 @@ export async function analyzeSignal(analysis, newsContext = '') {
   ], 900);
 }
 
-export async function analyzeElliottWave(analysis) {
-  const prompt = buildWavePrompt(analysis);
-  return await callAI([
-    { role: 'system', content: SYSTEM_PROMPT },
-    { role: 'user', content: prompt },
-  ], 800);
-}
-
 export async function analyzeNews(symbol, newsItems, ticker) {
   // Step 1: Enrichment sentimen via AI (karena CryptoCompare tidak punya skor sentimen)
   // Ini 1 AI call kecil (max 250 token) sebelum analisis utama
@@ -587,14 +548,6 @@ export async function scoreDiscoveredCoins(coinData, mode = 'safe') {
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user', content: prompt },
   ], 1200);
-}
-
-export async function analyzeMacro(macroData) {
-  const prompt = buildMacroPrompt(macroData);
-  return await callAI([
-    { role: 'system', content: SYSTEM_PROMPT },
-    { role: 'user', content: prompt },
-  ], 700);
 }
 
 // Free-form chat (untuk pertanyaan ad-hoc)

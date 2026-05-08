@@ -1,17 +1,18 @@
 /**
  * =============================================
- * CRYPTOSENSE BOT — Coin Discovery Scanner (v2)
+ * CRYPTOSENSE BOT — Coin Discovery Scanner (v3)
  * =============================================
- * Dual Mode:
+ * 3 Mode:
  *  1. SAFE MODE  → mean-reversion (oversold + volume)
- *  2. HYPE MODE  → momentum breakout + trending + volume anomaly
+ *  2. HYPE MODE  → momentum breakout + trending
+ *  3. EARLY MODE → pre-pump accumulation detection
  *
- * Hype Engine prioritaskan:
- *  - CoinGecko trending coins
- *  - Top gainers 1h/24h
- *  - Volume anomaly ekstrem (>3x)
- *  - Breakout dari resistance terdekat
- *  - Social proxy: trending rank + price acceleration
+ * Early Engine:
+ *  - Deteksi volume spike + price flat (hidden accumulation)
+ *  - Bollinger Bands squeeze (volatility compression)
+ *  - Funding rate negatif (short squeeze setup)
+ *  - Event calendar upcoming catalyst
+ *  - Multi-timeframe alignment (4H trend + 1H consolidation)
  */
 
 import {
@@ -20,8 +21,11 @@ import {
   fetchCryptoNews,
   fetchTrendingCoins,
   fetchTopGainers,
+  fetchFundingRate,
+  fetchBinanceDepth,
+  scrapeCoinMarketCal,
 } from '../ta/marketData.js';
-import { runFullAnalysis } from '../ta/indicators.js';
+import { runFullAnalysis, detectBBSqueeze } from '../ta/indicators.js';
 import { scoreDiscoveredCoins } from '../ai/analyzer.js';
 import { saveScanResult } from './database.js';
 
@@ -29,10 +33,7 @@ import { saveScanResult } from './database.js';
 // Filter config
 // ─────────────────────────────────────────────
 const FILTERS = {
-  minVolume24h: 2_000_000,          // Min $2M volume (turun biar kecil2 ikut)
-  minVolumeSpike: 1.5,              // 1.5x rata-rata = notable
-  rsiOversoldMax: 45,               // SAFE MODE: RSI < 45
-  rsiOverboughtMin: 55,             // HYPE MODE: RSI > 55 (momentum)
+  minVolume24h: 2_000_000,
   excludeStablecoins: [
     'USDT','USDC','BUSD','DAI','TUSD','USDP','FRAX','USDE','PYUSD',
     'FDUSD','USDX','BFUSD','RLUSD','USDS','CUSD','CEUR','LUSD','EURC','AUSD',
@@ -43,7 +44,55 @@ const FILTERS = {
 };
 
 // ─────────────────────────────────────────────
-// Hype Scoring (0-10) — lebih agresif
+// Early Mode: Strict Pre-Pump Filters
+// ─────────────────────────────────────────────
+const EARLY_FILTERS = {
+  maxChange24h: 8,      // Sudah naik >8% = late
+  maxChange1h: 3,       // Sudah gerak >3% = late
+  minVolumeSpike: 2.5,  // Whale mulai masuk
+  minVolume24h: 1_000_000,
+};
+
+// ─────────────────────────────────────────────
+// Scoring: Early (0-10) — "diam-diam ramai"
+// ─────────────────────────────────────────────
+function scoreEarly(coin, ta, volumeSpike, bbSqueeze, fundingData, eventData, depthData) {
+  let score = 0;
+  const change1h = coin.price_change_percentage_1h_in_currency || 0;
+  const change24h = coin.price_change_percentage_24h || 0;
+  const rsi = ta?.indicators?.rsi || 50;
+
+  // 1. Volume spike + price flat (max 3 pts) — hidden accumulation
+  if (volumeSpike >= 3.0 && Math.abs(change1h) < 2.0) score += 3;
+  else if (volumeSpike >= 2.5 && Math.abs(change1h) < 2.0) score += 2.5;
+  else if (volumeSpike >= 2.0 && Math.abs(change1h) < 3.0) score += 1.5;
+
+  // 2. BB Squeeze (max 2 pts) — spring loaded
+  if (bbSqueeze?.isSqueeze && bbSqueeze.bandwidth < 3.0) score += 2;
+  else if (bbSqueeze?.isSqueeze) score += 1.5;
+  else if (bbSqueeze?.bandwidth < 5.0) score += 0.5;
+
+  // 3. RSI 45-58 + volume expansion (max 1.5 pts)
+  if (rsi >= 45 && rsi <= 58 && volumeSpike >= 2.0) score += 1.5;
+  else if (rsi >= 40 && rsi <= 60 && volumeSpike >= 2.0) score += 1;
+
+  // 4. 4H EMA20 > EMA50 (max 1.5 pts) — higher TF healthy
+  if (ta?.indicators?.ema20 > ta?.indicators?.ema50) score += 1.5;
+
+  // 5. Funding negatif + flat (max 1 pt) — short squeeze potential
+  if (fundingData && fundingData.fundingRate < 0) score += 1;
+
+  // 6. Event dalam 7 hari (max 1 pt)
+  if (eventData?.hasEvent) score += 1;
+
+  // 7. Order book bid heavy (max 0.5 pt)
+  if (depthData && depthData.bidAskRatio > 1.5) score += 0.5;
+
+  return parseFloat(score.toFixed(1));
+}
+
+// ─────────────────────────────────────────────
+// Scoring: Hype (0-10)
 // ─────────────────────────────────────────────
 function scoreHype(coin, ta, trendingRank, volumeSpike, newsScore) {
   let score = 0;
@@ -51,71 +100,61 @@ function scoreHype(coin, ta, trendingRank, volumeSpike, newsScore) {
   const change24h = coin.price_change_percentage_24h || 0;
   const rsi = ta?.indicators?.rsi || 50;
 
-  // Trending rank (max 3 pts) — trending di CoinGecko = social hype proxy
   if (trendingRank === 1) score += 3;
   else if (trendingRank === 2) score += 2.5;
   else if (trendingRank === 3) score += 2;
   else if (trendingRank && trendingRank <= 7) score += 1.5;
   else if (trendingRank && trendingRank <= 15) score += 1;
 
-  // Momentum 1h (max 2 pts) — coin hype naik cepat dalam 1 jam
   if (change1h >= 8) score += 2;
   else if (change1h >= 4) score += 1.5;
   else if (change1h >= 2) score += 1;
   else if (change1h >= 1) score += 0.5;
 
-  // Momentum 24h (max 2 pts)
   if (change24h >= 15) score += 2;
   else if (change24h >= 8) score += 1.5;
   else if (change24h >= 4) score += 1;
   else if (change24h >= 2) score += 0.5;
 
-  // Volume anomaly (max 2 pts)
   if (volumeSpike >= 5) score += 2;
   else if (volumeSpike >= 3) score += 1.5;
   else if (volumeSpike >= 2) score += 1;
   else if (volumeSpike >= 1.5) score += 0.5;
 
-  // RSI momentum — hype coin sering overbought tapi masih terbang
-  if (rsi >= 60 && rsi <= 75) score += 1;   // strong momentum
-  else if (rsi >= 75 && rsi <= 85) score += 0.5; // very hot but risky
+  if (rsi >= 60 && rsi <= 75) score += 1;
+  else if (rsi >= 75 && rsi <= 85) score += 0.5;
 
-  // News sentiment (max 1 pt)
   score += Math.min(newsScore, 1);
 
   return parseFloat(score.toFixed(1));
 }
 
 // ─────────────────────────────────────────────
-// Safe Scoring (0-10) — mean reversion
+// Scoring: Safe (0-10)
 // ─────────────────────────────────────────────
 function scoreSafe(coin, ta, volumeSpike, newsScore) {
   let score = 0;
   const rsi = ta?.indicators?.rsi || 50;
   const change1h = coin.price_change_percentage_1h_in_currency || 0;
 
-  // Volume spike (max 3 pts)
   if (volumeSpike >= 3) score += 3;
   else if (volumeSpike >= 2) score += 2;
   else if (volumeSpike >= 1.5) score += 1;
 
-  // RSI position (max 3 pts)
   if (rsi >= 30 && rsi <= 40) score += 3;
   else if (rsi >= 40 && rsi <= 50) score += 2;
   else if (rsi >= 50 && rsi <= 60) score += 1;
 
-  // Price change 1h (max 2 pts) — slight recovery sign
   if (change1h >= 2) score += 2;
   else if (change1h >= 0.5) score += 1;
 
-  // News sentiment (max 2 pts)
   score += Math.min(newsScore, 2);
 
   return parseFloat(score.toFixed(1));
 }
 
 // ─────────────────────────────────────────────
-// Breakout Detection — apakah harga break resistance terdekat?
+// Breakout Detection
 // ─────────────────────────────────────────────
 function detectBreakout(ta, candles) {
   if (!ta || !candles || candles.length < 10) return false;
@@ -127,40 +166,32 @@ function detectBreakout(ta, candles) {
   const prevCandle = candles[candles.length - 2];
   const prevClose = prevCandle?.close || 0;
 
-  // Breakout = candle sebelumnya di bawah resistance, candle sekarang di atas
-  if (prevClose < nearestResistance && currentPrice > nearestResistance) {
-    return true;
-  }
-  // Atau harga saat ini > resistance dalam range 1%
-  if (currentPrice > nearestResistance && currentPrice < nearestResistance * 1.02) {
-    return true;
-  }
+  if (prevClose < nearestResistance && currentPrice > nearestResistance) return true;
+  if (currentPrice > nearestResistance && currentPrice < nearestResistance * 1.02) return true;
   return false;
 }
 
 // ─────────────────────────────────────────────
-// Main scanner — dual mode
+// Main scanner — 3 mode
 // ─────────────────────────────────────────────
 export async function runCoinScan(limit = 250, mode = 'safe') {
   console.log(`[Scanner] Starting ${mode} coin scan...`);
   const scanStart = Date.now();
   const isHype = mode === 'hype';
+  const isEarly = mode === 'early';
 
-  // ── Fetch data sources in parallel ───────────
+  // ── Fetch data sources ──────────────────────
   const [topCoins, trending, gainers] = await Promise.all([
     fetchTopCoins(limit),
     isHype ? fetchTrendingCoins() : Promise.resolve([]),
     isHype ? fetchTopGainers('24h', 100) : Promise.resolve([]),
   ]);
 
-  // Build trending rank map { SYMBOL: rank }
   const trendingMap = {};
   trending.forEach((c, i) => { trendingMap[c.symbol] = i + 1; });
-
-  // Build gainers set for fast lookup
   const gainerSet = new Set(gainers.map(g => g.symbol));
 
-  // ── Fetch news for context ──────────────────
+  // ── Fetch news ──────────────────────────────
   let allNews = [];
   try {
     allNews = await fetchCryptoNews([], isHype ? 'hot' : 'rising');
@@ -168,7 +199,6 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
     console.warn('[Scanner] Could not fetch news:', e.message);
   }
 
-  // Build news score map { SYMBOL: score }
   const newsMap = {};
   allNews.forEach(article => {
     article.currencies.forEach(sym => {
@@ -181,17 +211,28 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
   let filtered = topCoins.filter(coin => {
     const sym = coin.symbol.toUpperCase();
     if (FILTERS.excludeStablecoins.includes(sym)) return false;
-    if ((coin.total_volume || 0) < FILTERS.minVolume24h) return false;
+    const vol = coin.total_volume || 0;
+    if (isEarly && vol < EARLY_FILTERS.minVolume24h) return false;
+    if (!isEarly && vol < FILTERS.minVolume24h) return false;
     return true;
   });
 
-  // HYPE MODE: prioritaskan trending + gainers — masukkan ke depan array
+  // EARLY MODE: filter strict — coin yang belum naik banyak
+  if (isEarly) {
+    filtered = filtered.filter(coin => {
+      const change24h = Math.abs(coin.price_change_percentage_24h || 0);
+      const change1h = Math.abs(coin.price_change_percentage_1h_in_currency || 0);
+      return change24h < EARLY_FILTERS.maxChange24h && change1h < EARLY_FILTERS.maxChange1h;
+    });
+    console.log(`[Scanner] Early mode: ${filtered.length} coins after strict filter`);
+  }
+
+  // HYPE MODE: prioritaskan trending + gainers
   if (isHype) {
     const prioritizedSymbols = new Set([
       ...trending.map(c => c.symbol),
       ...gainers.slice(0, 50).map(g => g.symbol),
     ]);
-
     const prioritized = filtered.filter(c => prioritizedSymbols.has(c.symbol.toUpperCase()));
     const rest = filtered.filter(c => !prioritizedSymbols.has(c.symbol.toUpperCase()));
     filtered = [...prioritized, ...rest];
@@ -203,60 +244,75 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
   // ── Scan each coin ───────────────────────────
   const candidates = [];
   const batchSize = 8;
-  const scanLimit = isHype ? Math.min(filtered.length, 120) : Math.min(filtered.length, 80);
+  const scanLimit = isHype ? Math.min(filtered.length, 120)
+    : isEarly ? Math.min(filtered.length, 100)
+    : Math.min(filtered.length, 80);
 
   for (let i = 0; i < scanLimit; i++) {
     const coin = filtered[i];
     const symbol = coin.symbol.toUpperCase();
 
     try {
-      // Fetch klines + full TA analysis
+      // Fetch klines + full TA
       const candles = await fetchBinanceKlines(symbol, '1h', FILTERS.maxCandlesToFetch);
       let ta;
       try {
         ta = runFullAnalysis(candles, symbol, '1h');
-      } catch (e) {
-        continue; // Coin baru atau data kurang
-      }
+      } catch (e) { continue; }
 
       const rsi = ta.indicators.rsi || 50;
       const volumeSpike = ta.indicators.volumeSpike?.spikeRatio || 1;
       const newsScore = Math.max(0, newsMap[symbol] || 0);
-      const trendingRank = trendingMap[symbol] || null;
-      const isGainer = gainerSet.has(symbol);
-      const isBreakout = detectBreakout(ta, candles);
 
-      // ── Filtering per mode ────────────────────
+      // ── Early mode extra data ────────────────
+      let bbSqueeze = null;
+      let fundingData = null;
+      let eventData = null;
+      let depthData = null;
+
+      if (isEarly) {
+        bbSqueeze = detectBBSqueeze(candles, 20, 10, 4.0);
+      }
+
+      // ── Filtering per mode ───────────────────
       let passesFilter = false;
       if (isHype) {
-        // Hype mode: lebih longgar — yang penting ada momentum atau trending
         const change1h = coin.price_change_percentage_1h_in_currency || 0;
         const change24h = coin.price_change_percentage_24h || 0;
         const hasMomentum = change1h >= 1.5 || change24h >= 3;
         const hasVolume = volumeSpike >= 1.5;
-        const isTrending = !!trendingRank;
-        const hasBreakout = isBreakout;
-
-        passesFilter = (hasMomentum && hasVolume) || isTrending || hasBreakout || (isGainer && hasVolume);
+        const isTrending = !!trendingMap[symbol];
+        passesFilter = (hasMomentum && hasVolume) || isTrending || detectBreakout(ta, candles) || (gainerSet.has(symbol) && hasVolume);
+      } else if (isEarly) {
+        const change1h = Math.abs(coin.price_change_percentage_1h_in_currency || 0);
+        const change24h = Math.abs(coin.price_change_percentage_24h || 0);
+        const hasVolume = volumeSpike >= EARLY_FILTERS.minVolumeSpike;
+        const isFlat = change1h < 2.0 && change24h < EARLY_FILTERS.maxChange24h;
+        const hasAccumulation = hasVolume && (isFlat || bbSqueeze?.isSqueeze);
+        passesFilter = hasAccumulation;
       } else {
-        // Safe mode: RSI oversold + volume
-        const rsiOk = rsi <= FILTERS.rsiOversoldMax;
-        const volumeOk = volumeSpike >= FILTERS.minVolumeSpike;
+        const rsiOk = rsi <= 45;
+        const volumeOk = volumeSpike >= 1.5;
         const change1h = coin.price_change_percentage_1h_in_currency || 0;
-        const changeOk = Math.abs(change1h) >= 1.0;
-        passesFilter = (rsiOk && volumeOk) || (changeOk && volumeOk);
+        passesFilter = (rsiOk && volumeOk) || (Math.abs(change1h) >= 1.0 && volumeOk);
       }
 
       if (!passesFilter) continue;
 
-      // ── Scoring ───────────────────────────────
-      const score = isHype
-        ? scoreHype(coin, ta, trendingRank, volumeSpike, newsScore)
-        : scoreSafe(coin, ta, volumeSpike, newsScore);
+      // ── Scoring ──────────────────────────────
+      let score = 0;
+      if (isHype) {
+        score = scoreHype(coin, ta, trendingMap[symbol] || null, volumeSpike, newsScore);
+      } else if (isEarly) {
+        score = scoreEarly(coin, ta, volumeSpike, bbSqueeze, fundingData, eventData, depthData);
+      } else {
+        score = scoreSafe(coin, ta, volumeSpike, newsScore);
+      }
 
-      if (score < 2.5) continue;
+      const minScore = isEarly ? 7.0 : 2.5;
+      if (score < minScore) continue;
 
-      candidates.push({
+      const candidate = {
         symbol,
         name: coin.name,
         price: coin.current_price,
@@ -270,9 +326,6 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
         newsScore: parseFloat(newsScore.toFixed(1)),
         score,
         mode,
-        trendingRank,
-        isBreakout,
-        isGainer,
         // TA data
         signal: ta.signal.direction,
         atr: ta.indicators.atr,
@@ -283,9 +336,25 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
         resistance: ta.supportResistance.resistances[0] || null,
         ema20: ta.indicators.ema20,
         ema50: ta.indicators.ema50,
-      });
+      };
 
-      // Rate limit delay per batch
+      if (isEarly) {
+        candidate.bbBandwidth = bbSqueeze?.bandwidth || null;
+        candidate.bbSqueeze = bbSqueeze?.isSqueeze || false;
+        candidate.fundingRate = fundingData?.fundingRate || null;
+        candidate.hasEvent = eventData?.hasEvent || false;
+        candidate.eventTitle = eventData?.events?.[0]?.title || null;
+        candidate.bidAskRatio = depthData?.bidAskRatio || null;
+      }
+
+      if (isHype) {
+        candidate.trendingRank = trendingMap[symbol] || null;
+        candidate.isBreakout = detectBreakout(ta, candles);
+        candidate.isGainer = gainerSet.has(symbol);
+      }
+
+      candidates.push(candidate);
+
       if (i % batchSize === 0 && i > 0) {
         await new Promise(r => setTimeout(r, 800));
       }
@@ -295,34 +364,80 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
     }
   }
 
-  // ── Sort by score ────────────────────────────
+  // ── Early mode: enrichment untuk top 20 ──────
+  if (isEarly && candidates.length > 0) {
+    console.log(`[Scanner] Early mode: enriching top ${Math.min(candidates.length, 20)} candidates...`);
+    const topForEnrich = candidates.slice(0, 20);
+
+    for (let i = 0; i < topForEnrich.length; i++) {
+      const c = topForEnrich[i];
+      try {
+        // Funding rate (optional)
+        const funding = await fetchFundingRate(c.symbol);
+        if (funding) {
+          c.fundingRate = funding.fundingRate;
+          if (funding.fundingRate < 0) c.score += 1;
+        }
+      } catch (e) { /* skip */ }
+
+      try {
+        // Event calendar (optional)
+        const events = await scrapeCoinMarketCal(c.symbol);
+        if (events?.hasEvent) {
+          c.hasEvent = true;
+          c.eventTitle = events.events[0]?.title || null;
+          c.score += 1;
+        }
+      } catch (e) { /* skip */ }
+
+      try {
+        // Depth (optional, hanya top 10)
+        if (i < 10) {
+          const depth = await fetchBinanceDepth(c.symbol, 50);
+          if (depth) {
+            c.bidAskRatio = depth.bidAskRatio;
+            if (depth.bidAskRatio > 1.5) c.score += 0.5;
+          }
+        }
+      } catch (e) { /* skip */ }
+
+      await new Promise(r => setTimeout(r, 300));
+    }
+
+    // Re-sort setelah enrichment
+    candidates.sort((a, b) => b.score - a.score);
+  }
+
+  // ── Sort & limit ─────────────────────────────
   candidates.sort((a, b) => b.score - a.score);
   const topCandidates = candidates.slice(0, 15);
+  const maxPicks = 5;
+  const finalPicks = topCandidates.slice(0, maxPicks);
 
-  console.log(`[Scanner] Found ${topCandidates.length} candidates in ${Date.now() - scanStart}ms`);
+  console.log(`[Scanner] Found ${finalPicks.length} candidates in ${Date.now() - scanStart}ms`);
 
-  if (topCandidates.length === 0) {
-    return {
-      picks: [],
-      aiAnalysis: isHype
-        ? 'Tidak ada coin hype/momentum yang terdeteksi saat ini. Market sedang tenang atau volume rendah.'
-        : 'Tidak ada coin yang memenuhi kriteria scan saat ini. Market mungkin sedang sideways.',
+  if (finalPicks.length === 0) {
+    const msgMap = {
+      safe: 'Tidak ada coin yang memenuhi kriteria scan saat ini. Market mungkin sedang sideways.',
+      hype: 'Tidak ada coin hype/momentum yang terdeteksi saat ini. Market sedang tenang atau volume rendah.',
+      early: 'Tidak ada jejak akumulasi whale yang terdeteksi saat ini. Market sedang tenang, tidak ada setup pre-pump yang ketat.',
     };
+    return { picks: [], aiAnalysis: msgMap[mode] || msgMap.safe };
   }
 
   // ── AI scoring & narasi ───────────────────────
   let aiAnalysis;
   try {
-    aiAnalysis = await scoreDiscoveredCoins(topCandidates, mode);
+    aiAnalysis = await scoreDiscoveredCoins(finalPicks, mode);
   } catch (e) {
     console.error('[Scanner] AI analysis failed:', e.message);
-    aiAnalysis = formatFallbackScanResult(topCandidates, mode);
+    aiAnalysis = formatFallbackScanResult(finalPicks, mode);
   }
 
-  saveScanResult(topCandidates.slice(0, 5).map(c => c.symbol));
+  saveScanResult(finalPicks.map(c => c.symbol));
 
   return {
-    picks: topCandidates,
+    picks: finalPicks,
     aiAnalysis,
     scannedCount: filtered.length,
     duration: Date.now() - scanStart,
@@ -330,7 +445,7 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
 }
 
 // ─────────────────────────────────────────────
-// Fallback formatter — dual mode
+// Fallback formatter — 3 mode
 // ─────────────────────────────────────────────
 function fmt(price) {
   if (!price && price !== 0) return 'N/A';
@@ -344,11 +459,12 @@ function fmt(price) {
 function formatFallbackScanResult(candidates, mode = 'safe') {
   const top5 = candidates.slice(0, 5);
   const signalEmoji = { BUY: '🟢', SELL: '🔴', NEUTRAL: '🟡' };
-  const isHype = mode === 'hype';
 
-  let text = isHype
-    ? '🔥 *HYPE SCAN — TOP MOMENTUM PICKS*\n'
-    : '🔍 *COIN DISCOVERY — TOP PICKS*\n';
+  let text = '';
+  if (mode === 'early') text = '🕵️ *WHALE WATCH — EARLY ACCUMULATION*\n';
+  else if (mode === 'hype') text = '🔥 *HYPE SCAN — TOP MOMENTUM PICKS*\n';
+  else text = '🔍 *COIN DISCOVERY — TOP PICKS*\n';
+
   text += `_${new Date().toLocaleString('id-ID')}_\n\n`;
 
   top5.forEach((c, i) => {
@@ -360,14 +476,23 @@ function formatFallbackScanResult(candidates, mode = 'safe') {
     text += `💰 Harga: $${fmt(c.price)} | 1h: ${pct1h} | 24h: ${pct24}\n`;
     text += `📊 RSI: ${c.rsi} | Vol: ${c.volumeSpike}x rata-rata\n`;
 
-    if (c.trendingRank) text += `🔥 Trending #${c.trendingRank} di CoinGecko\n`;
-    if (c.isBreakout) text += `🚀 Breakout detected!\n`;
+    if (mode === 'early') {
+      if (c.bbSqueeze) text += `🌀 BB Squeeze detected!\n`;
+      if (c.fundingRate !== null && c.fundingRate < 0) text += `📉 Funding negatif: ${(c.fundingRate * 100).toFixed(4)}%\n`;
+      if (c.hasEvent) text += `📅 Event: ${c.eventTitle}\n`;
+      if (c.bidAskRatio) text += `⚖️ Bid/Ask: ${c.bidAskRatio}\n`;
+    }
+
+    if (mode === 'hype') {
+      if (c.trendingRank) text += `🔥 Trending #${c.trendingRank} di CoinGecko\n`;
+      if (c.isBreakout) text += `🚀 Breakout detected!\n`;
+    }
 
     if (c.sl && c.tp) {
-      const entryLow  = c.support ? fmt(Math.min(c.price * 0.998, c.support * 1.003)) : fmt(c.price * 0.995);
+      const entryLow = c.support ? fmt(Math.min(c.price * 0.998, c.support * 1.003)) : fmt(c.price * 0.995);
       const entryHigh = fmt(c.price);
-      const slPct  = (((c.price - c.sl) / c.price) * 100).toFixed(1);
-      const tpPct  = (((c.tp - c.price) / c.price) * 100).toFixed(1);
+      const slPct = (((c.price - c.sl) / c.price) * 100).toFixed(1);
+      const tpPct = (((c.tp - c.price) / c.price) * 100).toFixed(1);
       text += `🎯 Entry Zone: $${entryLow} – $${entryHigh}\n`;
       text += `🔴 SL: $${fmt(c.sl)} (-${slPct}%) | 🎯 TP: $${fmt(c.tp)} (+${tpPct}%)\n`;
       text += `⚖️ R:R = 1:${c.rr}\n`;
@@ -376,6 +501,10 @@ function formatFallbackScanResult(candidates, mode = 'safe') {
     text += '\n';
   });
 
-  text += '_⚠️ Bukan financial advice. Selalu cek chart sebelum entry._';
+  if (mode === 'early') {
+    text += '_⚠️ DETEKSI DINI — Bukan sinyal masuk langsung. Bisa flat 1-3 hari. Gunakan limit order._';
+  } else {
+    text += '_⚠️ Bukan financial advice. Selalu cek chart sebelum entry._';
+  }
   return text;
 }

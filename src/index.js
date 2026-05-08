@@ -112,46 +112,39 @@ function setupCronJobs(bot) {
     }
   });
 
-  // Daily watchlist digest — setiap hari jam 08:00 WIB (01:00 UTC)
-  cron.schedule('0 1 * * *', async () => {
-    console.log('[Cron] Running daily watchlist digest...');
+  // Early scan: setiap jam di menit ke-15 (offset biar gak tabrakan)
+  console.log(`[Cron] Early scan scheduled every hour (except 00:00-04:00 WITA quiet hours)`);
 
-    const userIds = getAllUserIds();
-    const adminId = process.env.ADMIN_CHAT_ID;
-    const targetUsers = adminId ? [adminId] : userIds;
+  function isQuietHours() {
+    const now = new Date();
+    const witaHour = (now.getUTCHours() + 8) % 24;
+    return witaHour >= 0 && witaHour < 4;
+  }
 
-    for (const userId of targetUsers) {
-      try {
-        const { getWatchlist } = await import('./utils/database.js');
-        const { fetchBinanceTicker } = await import('./ta/marketData.js');
-        const { formatPrice } = await import('./ta/marketData.js');
+  cron.schedule('15 * * * *', async () => {
+    if (isQuietHours()) {
+      console.log('[Cron] Quiet hours (00:00-04:00 WITA), skipping early scan broadcast');
+      return;
+    }
 
-        const watchlist = getWatchlist(userId);
-        if (watchlist.length === 0) continue;
+    console.log('[Cron] Running scheduled EARLY scan...');
 
-        const priceData = await Promise.allSettled(
-          watchlist.map(w => fetchBinanceTicker(w.symbol))
-        );
+    try {
+      const result = await runCoinScan(250, 'early');
 
-        let msg = `🌅 *DAILY WATCHLIST DIGEST*\n_${new Date().toLocaleDateString('id-ID', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}_\n\n`;
-
-        watchlist.forEach((w, i) => {
-          const result = priceData[i];
-          if (result.status === 'fulfilled') {
-            const t = result.value;
-            const emoji = t.priceChangePct >= 2 ? '🚀' : t.priceChangePct >= 0 ? '📈' : t.priceChangePct >= -2 ? '📉' : '💥';
-            msg += `${emoji} *${w.symbol}:* $${formatPrice(t.price)} (${t.priceChangePct > 0 ? '+' : ''}${t.priceChangePct}%)\n`;
-          }
-        });
-
-        msg += `\n_Gunakan /signal SYMBOL untuk analisis lebih dalam_`;
-
-        await bot.api.sendMessage(userId, msg, { parse_mode: 'Markdown' });
-        await new Promise(r => setTimeout(r, 100));
-
-      } catch (e) {
-        console.warn(`[Cron] Daily digest failed for ${userId}:`, e.message);
+      if (result.picks.length === 0) {
+        console.log('[Cron] No early picks found this scan');
+        return;
       }
+
+      const header = `🕵️ *AUTO-SCAN — WHALE WATCH*\n_${new Date().toLocaleString('id-ID')}_\n\n`;
+      const message = header + result.aiAnalysis;
+
+      await broadcastToUsers(bot, message);
+      console.log(`[Cron] Early scan complete. Sent ${result.picks.length} picks.`);
+
+    } catch (err) {
+      console.error('[Cron] Early scan failed:', err.message);
     }
   });
 }
@@ -161,7 +154,7 @@ function setupCronJobs(bot) {
 // ─────────────────────────────────────────────
 async function main() {
   console.log('\n' + '═'.repeat(50));
-  console.log('  CryptoSense Bot v1.0');
+  console.log('  CryptoSense Bot v2.0 — Whale Watch Edition');
   console.log('  Powered by OpenRouter + Binance + CoinGecko');
   console.log('═'.repeat(50) + '\n');
 
@@ -188,11 +181,10 @@ async function main() {
   await bot.api.setMyCommands([
     { command: 'signal',  description: '⚡ Sinyal beli/jual + SL & TP  |  /signal BTC' },
     { command: 'analyze', description: '📊 Analisis lengkap TA + AI    |  /analyze ETH 4h' },
-    { command: 'wave',    description: '🌊 Elliott Wave explanation     |  /wave SOL' },
     { command: 'news',    description: '📰 Analisis sentimen berita     |  /news BTC' },
-    { command: 'scan',    description: '🔍 Cari coin oversold + bounce (safe mode)' },
+    { command: 'early',   description: '🕵️ Deteksi akumulasi sebelum pump' },
     { command: 'hype',    description: '🔥 Cari coin viral & momentum (agresif)' },
-    { command: 'macro',   description: '🌍 Overview kondisi makro market' },
+    { command: 'scan',    description: '🔍 Cari coin oversold + bounce (safe mode)' },
     { command: 'watch',   description: '👁 Tambah watchlist  |  /watch BTC ETH SOL' },
     { command: 'list',    description: '📋 Lihat watchlist + harga terkini' },
     { command: 'unwatch', description: '🗑 Hapus dari watchlist  |  /unwatch BTC' },
