@@ -315,10 +315,12 @@ function buildDiscoveryPrompt(coinData, mode = 'safe') {
   const coinList = coinData.map(c => {
     let line = `• ${c.symbol} | Price: $${c.price} | 1h: ${c.change1h}% | 24h: ${c.change24h}% | Vol spike: ${c.volumeSpike}x | RSI: ${c.rsi}`;
     if (isEarly) {
-      if (c.whaleTrend) {
-        line += ` | On-chain whale: ${c.whaleTrend} score ${c.whaleScore ?? 0}/10`;
-        if (c.whaleNetPct !== null && c.whaleNetPct !== undefined) line += ` net ${c.whaleNetPct}% supply`;
-        if (c.whaleWallets !== null && c.whaleWallets !== undefined) line += ` wallets ${c.whaleWallets}`;
+      if (c.smartMoneyTrend) {
+        line += ` | CEX smart money: ${c.smartMoneyTrend} score ${c.smartMoneyScore ?? 0}/10`;
+        if (c.smartMoneyBuyRatio !== null && c.smartMoneyBuyRatio !== undefined) line += ` buy ratio ${c.smartMoneyBuyRatio}%`;
+        if (c.smartMoneyBuyDelta !== null && c.smartMoneyBuyDelta !== undefined) line += ` buy delta ${c.smartMoneyBuyDelta}%`;
+        if (c.smartMoneyVolumeRatio !== null && c.smartMoneyVolumeRatio !== undefined) line += ` volume ${c.smartMoneyVolumeRatio}x`;
+        if (c.smartMoneyAbsorption) line += ` absorption`;
       }
       if (c.bbSqueeze) line += ` | 🌀 BB Squeeze`;
       if (c.fundingRate !== null && c.fundingRate < 0) line += ` | 📉 Funding ${(c.fundingRate * 100).toFixed(4)}%`;
@@ -335,7 +337,7 @@ function buildDiscoveryPrompt(coinData, mode = 'safe') {
   }).join('\n');
 
   if (isEarly) {
-    return `Kamu adalah *WHALE ANALYST* — detektif yang membaca footprint smart money SEBELUM harga naik. 
+    return `Kamu adalah *CEX SMART MONEY ANALYST* — detektif yang membaca footprint order flow CEX SEBELUM harga naik.
 Kamu bukan pengejar momentum, kamu adalah pemburu akumulasi diam-diam.
 
 DATA COIN YANG TERDETEKSI:
@@ -348,29 +350,29 @@ Kriteria seleksi EARLY MODE (deteksi dini):
 - 4H EMA20 > EMA50 = higher timeframe trend healthy, fondasi kuat.
 - Funding rate negatif = banyak short, potensi short squeeze.
 - Event upcoming dalam 7 hari = catalyst yang bisa trigger breakout.
-- WAJIB: Prioritaskan hanya coin dengan On-chain whale ACCUMULATION. Jika on-chain BASELINE/NEUTRAL/UNSUPPORTED, jangan sebut sebagai buy signal; sebut "watchlist only".
-- Jika whale DISTRIBUTION, jangan rekomendasikan entry walaupun teknikal terlihat bullish.
+- WAJIB: Prioritaskan hanya coin dengan CEX smart money ACCUMULATION. Jika CEX smart money NEUTRAL/ERROR, jangan sebut sebagai buy signal; sebut "watchlist only".
+- Jika CEX smart money DISTRIBUTION, jangan rekomendasikan entry walaupun teknikal terlihat bullish.
 - JANGAN rekomendasikan coin yang sudah naik >8% dalam 24 jam. Itu sudah late.
 
 Format output WHALE WATCH:
 
-**🕵️ WHALE WATCH — EARLY ACCUMULATION**
+**🕵️ CEX SMART MONEY — EARLY ACCUMULATION**
 _|timestamp|_\n\n
 
 Untuk setiap coin (maksimal 5, minimal 3):
 **|RANK|. |SYMBOL| — Score |SCORE|/10 |emoji|**
-• **Footprint:** [apa yang whale lakukan? volume besar tapi harga diam? absorption? BB squeeze?]
+• **Footprint:** [apa yang smart money CEX lakukan? taker-buy dominan? volume besar tapi harga diam? absorption? BB squeeze?]
 • **Setup:** [kondisi teknikal: BB squeeze? EMA alignment? hidden accumulation? consolidation?]
 • **Catalyst:** [ada event upcoming? funding negatif? narrative apa?]
 • **Entry Zone:** $[range] — [zona akumulasi SAAT INI, bukan chase naik]
 • **Invalidation / Stop:** $[level] — [di bawah support akumulasi, thesis batal]
 • **Timeline:** [6-48 jam] — [kapan perkiraan breakout]
-• **Risk:** [MEDIUM/HIGH] — ["bisa flat 1-3 hari" / "whale belum kelar accumulate"]
+• **Risk:** [MEDIUM/HIGH] — ["bisa flat 1-3 hari" / "smart money belum kelar accumulate"]
 
 **📊 Market Pulse:** [1-2 kalimat: apa yang sedang diam-diam diakumulasi? sector/narrative apa?]
 
-**⚠️ WHALE DISCLAIMER:**
-Ini DETEKSI DINI, bukan sinyal konfirmasi. Harga bisa flat 1-3 hari. Gunakan LIMIT ORDER, jangan market buy. Sabar. Whale gak buru-buru.`;
+**⚠️ CEX SMART MONEY DISCLAIMER:**
+Ini DETEKSI DINI, bukan sinyal konfirmasi. Harga bisa flat 1-3 hari. Gunakan LIMIT ORDER, jangan market buy. Sabar. Smart money tidak buru-buru.`;
   }
 
   if (isHype) {

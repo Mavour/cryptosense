@@ -137,7 +137,7 @@ function setupCronJobs(bot) {
         return;
       }
 
-      const header = `🕵️ *AUTO-SCAN — WHALE WATCH*\n_${new Date().toLocaleString('id-ID')}_\n\n`;
+      const header = `🕵️ *AUTO-SCAN — CEX SMART MONEY WATCH*\n_${new Date().toLocaleString('id-ID')}_\n\n`;
       const message = header + result.aiAnalysis;
 
       await broadcastToUsers(bot, message);
@@ -183,7 +183,7 @@ async function main() {
     { command: 'analyze', description: '📊 Analisis lengkap TA + AI    |  /analyze ETH 4h' },
     { command: 'news',    description: '📰 Analisis sentimen berita     |  /news BTC' },
     { command: 'early',   description: '🕵️ Deteksi akumulasi sebelum pump' },
-    { command: 'whale',   description: '🐋 Cek akumulasi whale on-chain | /whale BONK' },
+    { command: 'whale',   description: '🐋 Cek smart money CEX | /whale BTC' },
     { command: 'hype',    description: '🔥 Cari coin viral & momentum (agresif)' },
     { command: 'scan',    description: '🔍 Cari coin oversold + bounce (safe mode)' },
     { command: 'watch',   description: '👁 Tambah watchlist  |  /watch BTC ETH SOL' },

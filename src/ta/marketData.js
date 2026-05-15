@@ -159,6 +159,8 @@ export async function fetchBinanceKlines(symbol, timeframe = '1h', limit = 200) 
     closeTime: k[6],
     quoteVolume: parseFloat(k[7]),
     trades: k[8],
+    takerBuyBaseVolume: parseFloat(k[9]),
+    takerBuyQuoteVolume: parseFloat(k[10]),
   }));
 
   setCache(cacheKey, candles);
@@ -799,6 +801,112 @@ export async function fetchBinanceDepth(symbol, limit = 50) {
     };
   } catch (e) {
     return null;
+  }
+}
+
+// BINANCE — CEX smart money accumulation proxy
+// Works for any listed CEX pair, regardless of the token's origin chain.
+export async function fetchCexSmartMoneyAccumulation(symbol, timeframe = '1h') {
+  const normalizedSymbol = normalizeBinanceSymbol(symbol);
+  const cacheKey = `cex-smart-money:${normalizedSymbol}:${timeframe}`;
+
+  const cached = getCached(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const [candles, depth, funding] = await Promise.all([
+      fetchBinanceKlines(symbol, timeframe, 80),
+      fetchBinanceDepth(symbol, 100).catch(() => null),
+      fetchFundingRate(symbol).catch(() => null),
+    ]);
+
+    if (!candles || candles.length < 30) {
+      throw new Error('Not enough CEX candles for smart money analysis');
+    }
+
+    const recent = candles.slice(-12);
+    const prior = candles.slice(-24, -12);
+    const sum = (arr, key) => arr.reduce((total, c) => total + (Number(c[key]) || 0), 0);
+    const avg = (arr, key) => arr.length ? sum(arr, key) / arr.length : 0;
+
+    const recentQuoteVolume = sum(recent, 'quoteVolume');
+    const priorQuoteVolume = sum(prior, 'quoteVolume');
+    const recentTakerBuyQuote = sum(recent, 'takerBuyQuoteVolume');
+    const priorTakerBuyQuote = sum(prior, 'takerBuyQuoteVolume');
+    const buyRatio = recentQuoteVolume > 0 ? recentTakerBuyQuote / recentQuoteVolume : 0.5;
+    const priorBuyRatio = priorQuoteVolume > 0 ? priorTakerBuyQuote / priorQuoteVolume : 0.5;
+    const buyRatioDelta = buyRatio - priorBuyRatio;
+    const volumeRatio = avg(prior, 'quoteVolume') > 0
+      ? avg(recent, 'quoteVolume') / avg(prior, 'quoteVolume')
+      : 1;
+    const startPrice = Number(recent[0]?.open || recent[0]?.close || 0);
+    const endPrice = Number(recent[recent.length - 1]?.close || 0);
+    const priceChangePct = startPrice > 0 ? ((endPrice - startPrice) / startPrice) * 100 : 0;
+    const absPriceChangePct = Math.abs(priceChangePct);
+    const bidAskRatio = depth?.bidAskRatio ?? null;
+    const fundingRate = funding?.fundingRate ?? null;
+    const absorption = volumeRatio >= 1.5 && absPriceChangePct <= 2.5 && buyRatio >= 0.52;
+
+    let score = 0;
+    if (buyRatio >= 0.6) score += 3;
+    else if (buyRatio >= 0.56) score += 2.25;
+    else if (buyRatio >= 0.52) score += 1.25;
+
+    if (buyRatioDelta >= 0.08) score += 2;
+    else if (buyRatioDelta >= 0.04) score += 1;
+
+    if (absorption) score += 2;
+    else if (volumeRatio >= 1.5 && absPriceChangePct <= 4) score += 1;
+
+    if (bidAskRatio !== null && bidAskRatio >= 1.5) score += 1;
+    else if (bidAskRatio !== null && bidAskRatio >= 1.2) score += 0.5;
+
+    if (fundingRate !== null && fundingRate < 0 && absPriceChangePct <= 4) score += 0.75;
+
+    if (priceChangePct >= 8) score -= 2.5;
+    else if (priceChangePct >= 5) score -= 1.25;
+
+    if (buyRatio <= 0.45 && buyRatioDelta < -0.03) score -= 2;
+    score = Math.max(0, Math.min(10, Number(score.toFixed(1))));
+
+    const trend = (buyRatio <= 0.45 && buyRatioDelta < -0.03)
+      ? 'DISTRIBUTION'
+      : score >= 5
+        ? 'ACCUMULATION'
+        : 'NEUTRAL';
+
+    const result = {
+      supported: true,
+      source: 'BINANCE_CEX',
+      symbol: normalizedSymbol,
+      trend,
+      score,
+      buyRatio: Number((buyRatio * 100).toFixed(1)),
+      priorBuyRatio: Number((priorBuyRatio * 100).toFixed(1)),
+      buyRatioDelta: Number((buyRatioDelta * 100).toFixed(1)),
+      volumeRatio: Number(volumeRatio.toFixed(2)),
+      priceChangePct: Number(priceChangePct.toFixed(2)),
+      absorption,
+      bidAskRatio,
+      fundingRate,
+      reason: trend === 'ACCUMULATION'
+        ? 'CEX taker-buy pressure increased while price has not run too far.'
+        : trend === 'DISTRIBUTION'
+          ? 'CEX taker-sell pressure is dominant versus prior window.'
+          : 'No strong CEX accumulation footprint yet.',
+    };
+
+    setCache(cacheKey, result);
+    return result;
+  } catch (e) {
+    return {
+      supported: false,
+      source: 'BINANCE_CEX',
+      symbol: normalizedSymbol,
+      trend: 'ERROR',
+      score: 0,
+      reason: e.message,
+    };
   }
 }
 

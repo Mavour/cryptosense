@@ -12,8 +12,7 @@ import {
   fetchBinanceKlines,
   fetchBinanceTicker,
   fetchCryptoNews,
-  fetchTopCoins,
-  fetchSolanaWhaleAccumulation,
+  fetchCexSmartMoneyAccumulation,
   formatPrice,
 } from '../ta/marketData.js';
 import { runFullAnalysis } from '../ta/indicators.js';
@@ -63,29 +62,22 @@ function resolveSymbol(input) {
   return nameMap[clean] || clean;
 }
 
-async function findCoinMeta(symbol) {
-  try {
-    const coins = await fetchTopCoins(250);
-    return coins.find(c => c.symbol?.toUpperCase() === symbol.toUpperCase()) || null;
-  } catch (e) {
-    return null;
-  }
-}
+function formatSmartMoneyLine(smartMoney) {
+  if (!smartMoney) return 'Tidak tersedia';
+  if (smartMoney.trend === 'ERROR') return `ERROR - ${smartMoney.reason}`;
 
-function formatWhaleLine(whale) {
-  if (!whale) return 'Tidak tersedia';
-  if (whale.trend === 'UNSUPPORTED') return 'UNSUPPORTED - belum ada mint Solana untuk symbol ini';
-  if (whale.trend === 'ERROR') return `ERROR - ${whale.reason}`;
-  if (whale.trend === 'BASELINE') return `BASELINE - snapshot awal tersimpan, perlu scan berikutnya`;
-
-  const netPct = whale.netDeltaPctSupply !== null && whale.netDeltaPctSupply !== undefined
-    ? `${whale.netDeltaPctSupply >= 0 ? '+' : ''}${whale.netDeltaPctSupply}% supply`
+  const buyRatio = smartMoney.buyRatio !== null && smartMoney.buyRatio !== undefined
+    ? `${smartMoney.buyRatio}% taker-buy`
     : 'N/A';
-  const netUsd = whale.netDeltaUsd !== null && whale.netDeltaUsd !== undefined
-    ? ` | ~$${Math.abs(whale.netDeltaUsd).toLocaleString('en-US', { maximumFractionDigits: 0 })}`
+  const buyDelta = smartMoney.buyRatioDelta !== null && smartMoney.buyRatioDelta !== undefined
+    ? ` | delta ${smartMoney.buyRatioDelta >= 0 ? '+' : ''}${smartMoney.buyRatioDelta}%`
     : '';
+  const volume = smartMoney.volumeRatio !== null && smartMoney.volumeRatio !== undefined
+    ? ` | vol ${smartMoney.volumeRatio}x`
+    : '';
+  const absorption = smartMoney.absorption ? ' | absorption' : '';
 
-  return `${whale.trend} (${whale.score}/10) | ${netPct}${netUsd} | wallets +${whale.accumulatingWallets ?? 0}/-${whale.distributingWallets ?? 0}`;
+  return `${smartMoney.trend} (${smartMoney.score}/10) | ${buyRatio}${buyDelta}${volume}${absorption}`;
 }
 
 export function createBot() {
@@ -133,7 +125,7 @@ export function createBot() {
       `/news BTC — Analisis berita + dampak harga\n\n` +
       `*Discovery:*\n` +
       `/early — Deteksi akumulasi sebelum pump\n` +
-      `/whale BONK — Cek akumulasi whale on-chain\n` +
+      `/whale BTC — Cek smart money CEX\n` +
       `/hype — Cari coin viral & momentum\n` +
       `/scan — Cari coin oversold + bounce (safe)\n\n` +
       `*Watchlist:*\n` +
@@ -209,18 +201,13 @@ export function createBot() {
 
     try {
       const resolvedSymbol = resolveSymbol(symbol);
-      const [candles, ticker, coinMeta] = await Promise.all([
+      const [candles, ticker] = await Promise.all([
         fetchBinanceKlines(resolvedSymbol, '1h', 100),
         fetchBinanceTicker(resolvedSymbol),
-        findCoinMeta(resolvedSymbol),
       ]);
       const analysis = runFullAnalysis(candles, resolvedSymbol, '1h');
       const { signal, riskManagement, currentPrice, indicators } = analysis;
-      const whale = await fetchSolanaWhaleAccumulation({
-        symbol: resolvedSymbol,
-        coin: coinMeta,
-        priceUsd: currentPrice,
-      });
+      const smartMoney = await fetchCexSmartMoneyAccumulation(resolvedSymbol, '1h');
 
       const signalEmoji = { BUY: '🟢', SELL: '🔴', NEUTRAL: '🟡', WAIT: '🟡' };
       const strengthEmoji = { STRONG: '⚡⚡⚡', MODERATE: '⚡⚡', WEAK: '⚡' };
@@ -237,21 +224,18 @@ export function createBot() {
       let displaySignal = signal.direction;
       let gateReason = '';
 
-      if (signal.direction === 'BUY' && whale.trend === 'DISTRIBUTION') {
+      if (signal.direction === 'BUY' && smartMoney.trend === 'DISTRIBUTION') {
         displaySignal = 'WAIT';
-        gateReason = 'TA bullish, tapi on-chain whale sedang distribusi.';
-      } else if (signal.direction === 'BUY' && isLateMove && whale.trend !== 'ACCUMULATION') {
+        gateReason = 'TA bullish, tapi CEX smart money sedang distribusi.';
+      } else if (signal.direction === 'BUY' && isLateMove && smartMoney.trend !== 'ACCUMULATION') {
         displaySignal = 'WAIT';
-        gateReason = 'Harga sudah extended dan belum ada bukti akumulasi whale.';
-      } else if (signal.direction === 'BUY' && whale.trend === 'BASELINE') {
-        displaySignal = 'WAIT';
-        gateReason = 'Snapshot whale baru dibuat; tunggu scan berikutnya untuk konfirmasi akumulasi.';
+        gateReason = 'Harga sudah extended dan belum ada bukti akumulasi smart money CEX.';
       }
 
       const riskBlock = displaySignal === 'WAIT'
         ? `*Risk Management:*\n` +
           `• Action: WAIT / jangan market buy\n` +
-          `• Buy valid hanya jika pullback ke support atau whale berubah ACCUMULATION\n` +
+          `• Buy valid hanya jika pullback ke support atau CEX smart money berubah ACCUMULATION\n` +
           `• Level pantau: $${formatPrice(currentPrice - atr)} - $${formatPrice(currentPrice)}\n` +
           `• Invalidation: $${formatPrice(sl)}\n\n`
         : `*Risk Management (ATR-based):*\n` +
@@ -264,7 +248,7 @@ export function createBot() {
         `${signalEmoji[displaySignal]} *SIGNAL — ${resolvedSymbol}*\n\n` +
         `💰 Harga: *$${formatPrice(currentPrice)}*\n` +
         `📊 Signal: *${displaySignal}* ${strengthEmoji[signal.strength] || ''}\n` +
-        `🐋 On-chain Whale: *${formatWhaleLine(whale)}*\n` +
+        `🐋 CEX Smart Money: *${formatSmartMoneyLine(smartMoney)}*\n` +
         `${gateReason ? `⚠️ Gate: ${gateReason}\n` : ''}` +
         `🎯 Confidence: *${signal.bullishPercent}% bullish*\n\n` +
         `*Indikator Kunci:*\n` +
@@ -286,39 +270,30 @@ export function createBot() {
   // ─────────────────────────────────────────────
   // /news [SYMBOL] — News analysis
   // ─────────────────────────────────────────────
-  // /whale [SYMBOL] — On-chain Solana whale accumulation check
+  // /whale [SYMBOL] — CEX smart money accumulation check
   bot.command('whale', async (ctx) => {
-    const symbol = ctx.message?.text?.split(' ')[1]?.toUpperCase() || 'BONK';
+    const symbol = ctx.message?.text?.split(' ')[1]?.toUpperCase() || 'BTC';
     const resolvedSymbol = resolveSymbol(symbol);
-    const statusMsg = await ctx.reply(`🐋 Mengecek on-chain whale untuk *${resolvedSymbol}*...`, { parse_mode: 'Markdown' });
+    const statusMsg = await ctx.reply(`🐋 Mengecek smart money CEX untuk *${resolvedSymbol}*...`, { parse_mode: 'Markdown' });
 
     try {
-      const [ticker, coinMeta] = await Promise.all([
-        fetchBinanceTicker(resolvedSymbol).catch(() => null),
-        findCoinMeta(resolvedSymbol),
-      ]);
-
-      const whale = await fetchSolanaWhaleAccumulation({
-        symbol: resolvedSymbol,
-        coin: coinMeta,
-        priceUsd: ticker?.price || coinMeta?.current_price || null,
-      });
+      const smartMoney = await fetchCexSmartMoneyAccumulation(resolvedSymbol, '1h');
 
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
 
-      const mintLine = whale.mintAddress ? `\nMint: \`${whale.mintAddress}\`` : '';
       const msg =
-        `🐋 *WHALE TRACK — ${resolvedSymbol}*\n\n` +
-        `Status: *${formatWhaleLine(whale)}*\n` +
-        `${mintLine}\n` +
-        `Top holder share: ${whale.topPctSupply ?? 'N/A'}%\n` +
-        `Snapshot age: ${whale.ageMinutes ?? 'baseline'} minutes\n\n` +
-        `Catatan: tracking memakai top token accounts Solana. Untuk coin non-Solana, tambahkan mint manual via SOLANA_MINT_OVERRIDES jika memang token ada di Solana.`;
+        `🐋 *CEX SMART MONEY — ${resolvedSymbol}*\n\n` +
+        `Status: *${formatSmartMoneyLine(smartMoney)}*\n` +
+        `Source: ${smartMoney.source || 'BINANCE_CEX'}\n` +
+        `Price move window: ${smartMoney.priceChangePct ?? 'N/A'}%\n` +
+        `Bid/Ask depth: ${smartMoney.bidAskRatio ?? 'N/A'}\n` +
+        `Funding: ${smartMoney.fundingRate !== null && smartMoney.fundingRate !== undefined ? `${(smartMoney.fundingRate * 100).toFixed(4)}%` : 'N/A'}\n\n` +
+        `Catatan: ini fokus CEX, jadi bisa dipakai lintas chain selama pair tersedia di Binance.`;
 
       await ctx.reply(msg, { parse_mode: 'Markdown' });
     } catch (err) {
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-      await ctx.reply(`❌ Whale check gagal: ${formatError(err)}`, { parse_mode: 'Markdown' });
+      await ctx.reply(`❌ Smart money check gagal: ${formatError(err)}`, { parse_mode: 'Markdown' });
     }
   });
 
@@ -521,13 +496,13 @@ export function createBot() {
   });
 
   // ─────────────────────────────────────────────
-  // /early — Whale Watch: pre-pump accumulation
+  // /early — CEX Smart Money: pre-pump accumulation
   // ─────────────────────────────────────────────
   bot.command('early', async (ctx) => {
     const statusMsg = await ctx.reply(
-      `🕵️ *Menjalankan WHALE WATCH...*\n\n` +
+      `🕵️ *Menjalankan CEX SMART MONEY WATCH...*\n\n` +
       `🔍 Mencari jejak akumulasi sebelum pump\n` +
-      `📡 Scanning volume anomaly + flat price + on-chain whale snapshots...`,
+      `📡 Scanning CEX order flow + taker-buy pressure + flat price...`,
       { parse_mode: 'Markdown' }
     );
 
@@ -538,9 +513,9 @@ export function createBot() {
 
       if (result.picks.length === 0) {
         await ctx.reply(
-          `🕵️ *Whale Watch Selesai*\n\n` +
-          `Tidak ada akumulasi whale on-chain yang terkonfirmasi saat ini.\n` +
-          `Jika ini scan pertama, baseline snapshot baru dibuat dan scan berikutnya baru bisa membandingkan akumulasi/distribusi.\n\n` +
+          `🕵️ *CEX Smart Money Watch Selesai*\n\n` +
+          `Tidak ada akumulasi smart money CEX yang terkonfirmasi saat ini.\n` +
+          `Bot menunggu taker-buy pressure, absorption, dan bid depth yang sehat sebelum memberi kandidat.\n\n` +
           `_Coba /hype untuk scan momentum, atau tunggu 1 jam._`,
           { parse_mode: 'Markdown' }
         );
@@ -549,13 +524,13 @@ export function createBot() {
 
       await ctx.reply(result.aiAnalysis, { parse_mode: 'Markdown' });
       await ctx.reply(
-        `_🕵️ Whale Watch selesai dalam ${(result.duration / 1000).toFixed(1)}s | ${result.scannedCount} coin dianalisis_`,
+        `_🕵️ CEX Smart Money Watch selesai dalam ${(result.duration / 1000).toFixed(1)}s | ${result.scannedCount} coin dianalisis_`,
         { parse_mode: 'Markdown' }
       );
 
     } catch (err) {
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-      await ctx.reply(`❌ Whale Watch gagal: ${formatError(err)}`, { parse_mode: 'Markdown' });
+      await ctx.reply(`❌ CEX Smart Money Watch gagal: ${formatError(err)}`, { parse_mode: 'Markdown' });
     }
   });
 

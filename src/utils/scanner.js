@@ -24,7 +24,7 @@ import {
   fetchFundingRate,
   fetchBinanceDepth,
   scrapeCoinMarketCal,
-  fetchSolanaWhaleAccumulation,
+  fetchCexSmartMoneyAccumulation,
 } from '../ta/marketData.js';
 import { runFullAnalysis, detectBBSqueeze } from '../ta/indicators.js';
 import { scoreDiscoveredCoins } from '../ai/analyzer.js';
@@ -50,14 +50,14 @@ const FILTERS = {
 const EARLY_FILTERS = {
   maxChange24h: 8,      // Sudah naik >8% = late
   maxChange1h: 3,       // Sudah gerak >3% = late
-  minVolumeSpike: 2.5,  // Whale mulai masuk
+  minVolumeSpike: 2.5,  // Smart money mulai masuk
   minVolume24h: 1_000_000,
 };
 
 // ─────────────────────────────────────────────
 // Scoring: Early (0-10) — "diam-diam ramai"
 // ─────────────────────────────────────────────
-function scoreEarly(coin, ta, volumeSpike, bbSqueeze, fundingData, eventData, depthData, whaleData) {
+function scoreEarly(coin, ta, volumeSpike, bbSqueeze, fundingData, eventData, depthData, smartMoneyData) {
   let score = 0;
   const change1h = coin.price_change_percentage_1h_in_currency || 0;
   const change24h = coin.price_change_percentage_24h || 0;
@@ -89,9 +89,9 @@ function scoreEarly(coin, ta, volumeSpike, bbSqueeze, fundingData, eventData, de
   // 7. Order book bid heavy (max 0.5 pt)
   if (depthData && depthData.bidAskRatio > 1.5) score += 0.5;
 
-  // 8. Real on-chain whale accumulation (max 2.5 pts)
-  if (whaleData?.trend === 'ACCUMULATION') score += Math.min(2.5, 1 + (whaleData.score * 0.2));
-  else if (whaleData?.trend === 'DISTRIBUTION') score -= 3;
+  // 8. CEX smart money accumulation (max 3 pts)
+  if (smartMoneyData?.trend === 'ACCUMULATION') score += Math.min(3, 1 + (smartMoneyData.score * 0.3));
+  else if (smartMoneyData?.trend === 'DISTRIBUTION') score -= 3;
 
   return parseFloat(score.toFixed(1));
 }
@@ -184,7 +184,7 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
   const scanStart = Date.now();
   const isHype = mode === 'hype';
   const isEarly = mode === 'early';
-  const requireWhaleAccumulation = process.env.STRICT_WHALE_ACCUMULATION !== 'false';
+  const requireSmartMoneyAccumulation = process.env.STRICT_SMART_MONEY_ACCUMULATION !== 'false';
 
   // ── Fetch data sources ──────────────────────
   const [topCoins, trending, gainers] = await Promise.all([
@@ -275,7 +275,7 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
       let fundingData = null;
       let eventData = null;
       let depthData = null;
-      let whaleData = null;
+      let smartMoneyData = null;
 
       if (isEarly) {
         bbSqueeze = detectBBSqueeze(candles, 20, 10, 4.0);
@@ -311,7 +311,7 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
       if (isHype) {
         score = scoreHype(coin, ta, trendingMap[symbol] || null, volumeSpike, newsScore);
       } else if (isEarly) {
-        score = scoreEarly(coin, ta, volumeSpike, bbSqueeze, fundingData, eventData, depthData, whaleData);
+        score = scoreEarly(coin, ta, volumeSpike, bbSqueeze, fundingData, eventData, depthData, smartMoneyData);
       } else {
         score = scoreSafe(coin, ta, volumeSpike, newsScore);
       }
@@ -354,13 +354,13 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
         candidate.hasEvent = eventData?.hasEvent || false;
         candidate.eventTitle = eventData?.events?.[0]?.title || null;
         candidate.bidAskRatio = depthData?.bidAskRatio || null;
-        candidate.whaleTrend = null;
-        candidate.whaleScore = null;
-        candidate.whaleNetPct = null;
-        candidate.whaleNetUsd = null;
-        candidate.whaleTopPct = null;
-        candidate.whaleWallets = null;
-        candidate.whaleReason = null;
+        candidate.smartMoneyTrend = null;
+        candidate.smartMoneyScore = null;
+        candidate.smartMoneyBuyRatio = null;
+        candidate.smartMoneyBuyDelta = null;
+        candidate.smartMoneyVolumeRatio = null;
+        candidate.smartMoneyAbsorption = null;
+        candidate.smartMoneyReason = null;
       }
 
       if (isHype) {
@@ -388,25 +388,19 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
     for (let i = 0; i < topForEnrich.length; i++) {
       const c = topForEnrich[i];
       try {
-        const whale = await fetchSolanaWhaleAccumulation({
-          symbol: c.symbol,
-          coin: c.coin,
-          priceUsd: c.price,
-        });
+        const smartMoney = await fetchCexSmartMoneyAccumulation(c.symbol, '1h');
 
-        c.whaleTrend = whale.trend;
-        c.whaleScore = whale.score;
-        c.whaleNetPct = whale.netDeltaPctSupply ?? null;
-        c.whaleNetUsd = whale.netDeltaUsd ?? null;
-        c.whaleTopPct = whale.topPctSupply ?? null;
-        c.whaleWallets = whale.accumulatingWallets ?? null;
-        c.whaleReason = whale.reason;
-        c.mintAddress = whale.mintAddress || null;
+        c.smartMoneyTrend = smartMoney.trend;
+        c.smartMoneyScore = smartMoney.score;
+        c.smartMoneyBuyRatio = smartMoney.buyRatio ?? null;
+        c.smartMoneyBuyDelta = smartMoney.buyRatioDelta ?? null;
+        c.smartMoneyVolumeRatio = smartMoney.volumeRatio ?? null;
+        c.smartMoneyAbsorption = smartMoney.absorption ?? false;
+        c.smartMoneyReason = smartMoney.reason;
 
-        if (whale.trend === 'ACCUMULATION') c.score += Math.min(2.5, 1 + (whale.score * 0.2));
-        else if (whale.trend === 'DISTRIBUTION') c.score -= 3;
-        else if (whale.trend === 'BASELINE') c.score -= 0.5;
-        else if (whale.trend === 'UNSUPPORTED' || whale.trend === 'ERROR') c.score -= 1;
+        if (smartMoney.trend === 'ACCUMULATION') c.score += Math.min(3, 1 + (smartMoney.score * 0.3));
+        else if (smartMoney.trend === 'DISTRIBUTION') c.score -= 3;
+        else if (smartMoney.trend === 'ERROR') c.score -= 1;
       } catch (e) { /* skip */ }
 
       try {
@@ -445,16 +439,16 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
     // Re-sort setelah enrichment
     candidates.sort((a, b) => b.score - a.score);
 
-    if (requireWhaleAccumulation) {
+    if (requireSmartMoneyAccumulation) {
       for (let i = candidates.length - 1; i >= 0; i--) {
-        if (candidates[i].whaleTrend !== 'ACCUMULATION') {
+        if (candidates[i].smartMoneyTrend !== 'ACCUMULATION') {
           candidates.splice(i, 1);
         }
       }
-      console.log(`[Scanner] Early mode: ${candidates.length} candidates after on-chain whale accumulation gate`);
+      console.log(`[Scanner] Early mode: ${candidates.length} candidates after CEX smart money accumulation gate`);
     } else {
       for (let i = candidates.length - 1; i >= 0; i--) {
-        if (candidates[i].whaleTrend === 'DISTRIBUTION') {
+        if (candidates[i].smartMoneyTrend === 'DISTRIBUTION') {
           candidates.splice(i, 1);
         }
       }
@@ -473,7 +467,7 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
     const msgMap = {
       safe: 'Tidak ada coin yang memenuhi kriteria scan saat ini. Market mungkin sedang sideways.',
       hype: 'Tidak ada coin hype/momentum yang terdeteksi saat ini. Market sedang tenang atau volume rendah.',
-      early: 'Tidak ada jejak akumulasi whale on-chain yang terkonfirmasi saat ini. Jika ini scan pertama, bot baru membuat baseline snapshot; scan berikutnya baru bisa membandingkan akumulasi/distribusi.',
+      early: 'Tidak ada jejak akumulasi smart money CEX yang terkonfirmasi saat ini. Bot sekarang menunggu taker-buy pressure, absorption, dan bid depth yang sehat sebelum memberi kandidat.',
     };
     return { picks: [], aiAnalysis: msgMap[mode] || msgMap.safe };
   }
@@ -514,7 +508,7 @@ function formatFallbackScanResult(candidates, mode = 'safe') {
   const signalEmoji = { BUY: '🟢', SELL: '🔴', NEUTRAL: '🟡' };
 
   let text = '';
-  if (mode === 'early') text = '🕵️ *WHALE WATCH — EARLY ACCUMULATION*\n';
+  if (mode === 'early') text = '🕵️ *CEX SMART MONEY — EARLY ACCUMULATION*\n';
   else if (mode === 'hype') text = '🔥 *HYPE SCAN — TOP MOMENTUM PICKS*\n';
   else text = '🔍 *COIN DISCOVERY — TOP PICKS*\n';
 
@@ -530,11 +524,8 @@ function formatFallbackScanResult(candidates, mode = 'safe') {
     text += `📊 RSI: ${c.rsi} | Vol: ${c.volumeSpike}x rata-rata\n`;
 
     if (mode === 'early') {
-      if (c.whaleTrend) {
-        const whaleNet = c.whaleNetPct !== null && c.whaleNetPct !== undefined
-          ? `${c.whaleNetPct >= 0 ? '+' : ''}${c.whaleNetPct}% supply`
-          : 'baseline';
-        text += `🐋 On-chain: ${c.whaleTrend} | ${whaleNet} | wallets: ${c.whaleWallets ?? 'N/A'}\n`;
+      if (c.smartMoneyTrend) {
+        text += `🐋 CEX Smart Money: ${c.smartMoneyTrend} | Buy: ${c.smartMoneyBuyRatio ?? 'N/A'}% | Vol: ${c.smartMoneyVolumeRatio ?? 'N/A'}x\n`;
       }
       if (c.bbSqueeze) text += `🌀 BB Squeeze detected!\n`;
       if (c.fundingRate !== null && c.fundingRate < 0) text += `📉 Funding negatif: ${(c.fundingRate * 100).toFixed(4)}%\n`;
