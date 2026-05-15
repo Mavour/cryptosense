@@ -157,11 +157,20 @@ ATURAN PENTING:
 // PROMPT BUILDER — Signal Analysis
 // ─────────────────────────────────────────────
 function buildSignalPrompt(analysis, newsContext = '') {
-  const { symbol, timeframe, currentPrice, indicators, signal, riskManagement, supportResistance, fibonacci } = analysis;
+  const { symbol, timeframe, currentPrice, indicators, signal, riskManagement, supportResistance, fibonacci, smartMoney } = analysis;
   const ind = indicators;
 
   const newsSection = newsContext
     ? `\n📰 KONTEKS BERITA TERKINI:\n${newsContext}\n`
+    : '';
+  const smartMoneySection = smartMoney
+    ? `\n🐋 CEX SMART MONEY:\n` +
+      `• Trend: ${smartMoney.trend} (${smartMoney.score}/10)\n` +
+      `• Taker Buy Ratio: ${smartMoney.buyRatio ?? 'N/A'}% | Delta: ${smartMoney.buyRatioDelta ?? 'N/A'}%\n` +
+      `• Volume Ratio: ${smartMoney.volumeRatio ?? 'N/A'}x | Price Window: ${smartMoney.priceChangePct ?? 'N/A'}%\n` +
+      `• Absorption: ${smartMoney.absorption ? 'YES' : 'NO'} | Bid/Ask: ${smartMoney.bidAskRatio ?? 'N/A'}\n` +
+      `• Funding: ${smartMoney.fundingRate !== null && smartMoney.fundingRate !== undefined ? `${(smartMoney.fundingRate * 100).toFixed(4)}%` : 'N/A'}\n` +
+      `• Note: ${smartMoney.reason}\n`
     : '';
 
   return `Analisis trading untuk ${symbol} timeframe ${timeframe}:
@@ -192,6 +201,7 @@ ${ind.volumeSpike ? `• Volume Spike: ${ind.volumeSpike.spikeRatio}x rata-rata 
 • Suggested SL: $${riskManagement.suggestedSL}
 • Suggested TP: $${riskManagement.suggestedTP}
 • R:R Ratio: 1:${riskManagement.riskRewardRatio}
+${smartMoneySection}
 ${newsSection}
 ---
 Berikan analisis komprehensif dengan format:
@@ -205,7 +215,7 @@ Berikan analisis komprehensif dengan format:
 [interpretasi RSI, MACD, BB, volume]
 
 **Smart Money View:**
-[identifikasi Order Block, FVG, atau liquidity zone yang relevan dari data S/R dan Fibonacci]
+[wajib bahas CEX taker-buy pressure, absorption, bid/ask, funding. Jika CEX smart money NEUTRAL/DISTRIBUTION, jangan rekomendasikan market buy walau TA bullish]
 
 **🎯 Rekomendasi Aksi:**
 • Action: BUY / SELL / WAIT

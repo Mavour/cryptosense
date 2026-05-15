@@ -165,7 +165,8 @@ export function createBot() {
 
       await editMessage(ctx, statusMsg, `🧮 Menghitung indikator...\n_RSI, MACD, EMA, Bollinger Bands..._`);
 
-      const analysis = runFullAnalysis(candles, symbol, timeframe);
+      const analysis = runFullAnalysis(candles, resolvedSymbol, timeframe);
+      analysis.smartMoney = await fetchCexSmartMoneyAccumulation(resolvedSymbol, timeframe);
 
       // Fetch news for context
       let newsContext = '';
@@ -590,6 +591,7 @@ export function createBot() {
           ]);
           await editMessage(ctx, statusMsg, `🤖 AI menganalisis data real ${resolvedSymbol}...`);
           const analysis = runFullAnalysis(candles, resolvedSymbol, timeframe);
+          analysis.smartMoney = await fetchCexSmartMoneyAccumulation(resolvedSymbol, timeframe);
           const aiResponse = await analyzeSignal(analysis, '');
           await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
           await ctx.reply(aiResponse, { parse_mode: 'Markdown' });
