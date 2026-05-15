@@ -3,12 +3,19 @@
  * CRYPTOSENSE BOT — Telegram Bot Handlers
  * =============================================
  * Framework: Grammy
- * Commands: /start /analyze /signal /news /watch /unwatch /list /scan /hype /early /status /help
+ * Commands: /start /analyze /signal /news /whale /watch /unwatch /list /scan /hype /early /status /help
  */
 
 import { Bot } from 'grammy';
 import axios from 'axios';
-import { fetchBinanceKlines, fetchBinanceTicker, fetchCryptoNews, formatPrice } from '../ta/marketData.js';
+import {
+  fetchBinanceKlines,
+  fetchBinanceTicker,
+  fetchCryptoNews,
+  fetchTopCoins,
+  fetchSolanaWhaleAccumulation,
+  formatPrice,
+} from '../ta/marketData.js';
 import { runFullAnalysis } from '../ta/indicators.js';
 import { analyzeSignal, analyzeNews, freeChat, analyzeChartImage } from '../ai/analyzer.js';
 import { addToWatchlist, removeFromWatchlist, getWatchlist, upsertUser, getStats } from '../utils/database.js';
@@ -56,6 +63,31 @@ function resolveSymbol(input) {
   return nameMap[clean] || clean;
 }
 
+async function findCoinMeta(symbol) {
+  try {
+    const coins = await fetchTopCoins(250);
+    return coins.find(c => c.symbol?.toUpperCase() === symbol.toUpperCase()) || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function formatWhaleLine(whale) {
+  if (!whale) return 'Tidak tersedia';
+  if (whale.trend === 'UNSUPPORTED') return 'UNSUPPORTED - belum ada mint Solana untuk symbol ini';
+  if (whale.trend === 'ERROR') return `ERROR - ${whale.reason}`;
+  if (whale.trend === 'BASELINE') return `BASELINE - snapshot awal tersimpan, perlu scan berikutnya`;
+
+  const netPct = whale.netDeltaPctSupply !== null && whale.netDeltaPctSupply !== undefined
+    ? `${whale.netDeltaPctSupply >= 0 ? '+' : ''}${whale.netDeltaPctSupply}% supply`
+    : 'N/A';
+  const netUsd = whale.netDeltaUsd !== null && whale.netDeltaUsd !== undefined
+    ? ` | ~$${Math.abs(whale.netDeltaUsd).toLocaleString('en-US', { maximumFractionDigits: 0 })}`
+    : '';
+
+  return `${whale.trend} (${whale.score}/10) | ${netPct}${netUsd} | wallets +${whale.accumulatingWallets ?? 0}/-${whale.distributingWallets ?? 0}`;
+}
+
 export function createBot() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) throw new Error('TELEGRAM_BOT_TOKEN not set in .env');
@@ -101,6 +133,7 @@ export function createBot() {
       `/news BTC — Analisis berita + dampak harga\n\n` +
       `*Discovery:*\n` +
       `/early — Deteksi akumulasi sebelum pump\n` +
+      `/whale BONK — Cek akumulasi whale on-chain\n` +
       `/hype — Cari coin viral & momentum\n` +
       `/scan — Cari coin oversold + bounce (safe)\n\n` +
       `*Watchlist:*\n` +
@@ -175,11 +208,21 @@ export function createBot() {
     const statusMsg = await ctx.reply(`⚡ Generating signal untuk *${symbol}*...`, { parse_mode: 'Markdown' });
 
     try {
-      const candles = await fetchBinanceKlines(symbol, '1h', 100);
-      const analysis = runFullAnalysis(candles, symbol, '1h');
+      const resolvedSymbol = resolveSymbol(symbol);
+      const [candles, ticker, coinMeta] = await Promise.all([
+        fetchBinanceKlines(resolvedSymbol, '1h', 100),
+        fetchBinanceTicker(resolvedSymbol),
+        findCoinMeta(resolvedSymbol),
+      ]);
+      const analysis = runFullAnalysis(candles, resolvedSymbol, '1h');
       const { signal, riskManagement, currentPrice, indicators } = analysis;
+      const whale = await fetchSolanaWhaleAccumulation({
+        symbol: resolvedSymbol,
+        coin: coinMeta,
+        priceUsd: currentPrice,
+      });
 
-      const signalEmoji = { BUY: '🟢', SELL: '🔴', NEUTRAL: '🟡' };
+      const signalEmoji = { BUY: '🟢', SELL: '🔴', NEUTRAL: '🟡', WAIT: '🟡' };
       const strengthEmoji = { STRONG: '⚡⚡⚡', MODERATE: '⚡⚡', WEAK: '⚡' };
 
       // SL/TP selalu dihitung dari ATR agar arahnya benar
@@ -190,21 +233,45 @@ export function createBot() {
       const tp  = parseFloat((currentPrice + atr * 2.5).toFixed(6));
       const slPct = (((currentPrice - sl) / currentPrice) * 100).toFixed(2);
       const tpPct = (((tp - currentPrice) / currentPrice) * 100).toFixed(2);
+      const isLateMove = ticker.priceChangePct >= 8 || indicators.rsi >= 70;
+      let displaySignal = signal.direction;
+      let gateReason = '';
+
+      if (signal.direction === 'BUY' && whale.trend === 'DISTRIBUTION') {
+        displaySignal = 'WAIT';
+        gateReason = 'TA bullish, tapi on-chain whale sedang distribusi.';
+      } else if (signal.direction === 'BUY' && isLateMove && whale.trend !== 'ACCUMULATION') {
+        displaySignal = 'WAIT';
+        gateReason = 'Harga sudah extended dan belum ada bukti akumulasi whale.';
+      } else if (signal.direction === 'BUY' && whale.trend === 'BASELINE') {
+        displaySignal = 'WAIT';
+        gateReason = 'Snapshot whale baru dibuat; tunggu scan berikutnya untuk konfirmasi akumulasi.';
+      }
+
+      const riskBlock = displaySignal === 'WAIT'
+        ? `*Risk Management:*\n` +
+          `• Action: WAIT / jangan market buy\n` +
+          `• Buy valid hanya jika pullback ke support atau whale berubah ACCUMULATION\n` +
+          `• Level pantau: $${formatPrice(currentPrice - atr)} - $${formatPrice(currentPrice)}\n` +
+          `• Invalidation: $${formatPrice(sl)}\n\n`
+        : `*Risk Management (ATR-based):*\n` +
+          `• 🎯 Entry: $${formatPrice(currentPrice)}\n` +
+          `• 🔴 Stop Loss: $${formatPrice(sl)} (-${slPct}%)\n` +
+          `• 🎯 Take Profit: $${formatPrice(tp)} (+${tpPct}%)\n` +
+          `• ⚖️ R:R Ratio: 1:1.67\n\n`;
 
       const msg =
-        `${signalEmoji[signal.direction]} *SIGNAL — ${symbol}*\n\n` +
+        `${signalEmoji[displaySignal]} *SIGNAL — ${resolvedSymbol}*\n\n` +
         `💰 Harga: *$${formatPrice(currentPrice)}*\n` +
-        `📊 Signal: *${signal.direction}* ${strengthEmoji[signal.strength] || ''}\n` +
+        `📊 Signal: *${displaySignal}* ${strengthEmoji[signal.strength] || ''}\n` +
+        `🐋 On-chain Whale: *${formatWhaleLine(whale)}*\n` +
+        `${gateReason ? `⚠️ Gate: ${gateReason}\n` : ''}` +
         `🎯 Confidence: *${signal.bullishPercent}% bullish*\n\n` +
         `*Indikator Kunci:*\n` +
         `• RSI: ${indicators.rsi} ${indicators.rsi < 30 ? '🔴 Oversold' : indicators.rsi > 70 ? '🔴 Overbought' : '⚪'}\n` +
         `• EMA20 ${indicators.ema20 > indicators.ema50 ? '>' : '<'} EMA50 ${indicators.ema20 > indicators.ema50 ? '✅' : '❌'}\n` +
         `• MACD Histogram: ${indicators.macd.histogram > 0 ? '🟢 Positif' : '🔴 Negatif'} (${indicators.macd.histogram})\n\n` +
-        `*Risk Management (ATR-based):*\n` +
-        `• 🎯 Entry: $${formatPrice(currentPrice)}\n` +
-        `• 🔴 Stop Loss: $${formatPrice(sl)} (-${slPct}%)\n` +
-        `• 🎯 Take Profit: $${formatPrice(tp)} (+${tpPct}%)\n` +
-        `• ⚖️ R:R Ratio: 1:1.67\n\n` +
+        riskBlock +
         `_⚠️ Bukan financial advice. Timeframe: 1H._`;
 
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
@@ -219,6 +286,42 @@ export function createBot() {
   // ─────────────────────────────────────────────
   // /news [SYMBOL] — News analysis
   // ─────────────────────────────────────────────
+  // /whale [SYMBOL] — On-chain Solana whale accumulation check
+  bot.command('whale', async (ctx) => {
+    const symbol = ctx.message?.text?.split(' ')[1]?.toUpperCase() || 'BONK';
+    const resolvedSymbol = resolveSymbol(symbol);
+    const statusMsg = await ctx.reply(`🐋 Mengecek on-chain whale untuk *${resolvedSymbol}*...`, { parse_mode: 'Markdown' });
+
+    try {
+      const [ticker, coinMeta] = await Promise.all([
+        fetchBinanceTicker(resolvedSymbol).catch(() => null),
+        findCoinMeta(resolvedSymbol),
+      ]);
+
+      const whale = await fetchSolanaWhaleAccumulation({
+        symbol: resolvedSymbol,
+        coin: coinMeta,
+        priceUsd: ticker?.price || coinMeta?.current_price || null,
+      });
+
+      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+
+      const mintLine = whale.mintAddress ? `\nMint: \`${whale.mintAddress}\`` : '';
+      const msg =
+        `🐋 *WHALE TRACK — ${resolvedSymbol}*\n\n` +
+        `Status: *${formatWhaleLine(whale)}*\n` +
+        `${mintLine}\n` +
+        `Top holder share: ${whale.topPctSupply ?? 'N/A'}%\n` +
+        `Snapshot age: ${whale.ageMinutes ?? 'baseline'} minutes\n\n` +
+        `Catatan: tracking memakai top token accounts Solana. Untuk coin non-Solana, tambahkan mint manual via SOLANA_MINT_OVERRIDES jika memang token ada di Solana.`;
+
+      await ctx.reply(msg, { parse_mode: 'Markdown' });
+    } catch (err) {
+      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+      await ctx.reply(`❌ Whale check gagal: ${formatError(err)}`, { parse_mode: 'Markdown' });
+    }
+  });
+
   bot.command('news', async (ctx) => {
     const symbol = ctx.message?.text?.split(' ')[1]?.toUpperCase() || 'BTC';
 
@@ -424,7 +527,7 @@ export function createBot() {
     const statusMsg = await ctx.reply(
       `🕵️ *Menjalankan WHALE WATCH...*\n\n` +
       `🔍 Mencari jejak akumulasi sebelum pump\n` +
-      `📡 Scanning volume anomaly + flat price + BB squeeze...`,
+      `📡 Scanning volume anomaly + flat price + on-chain whale snapshots...`,
       { parse_mode: 'Markdown' }
     );
 
@@ -436,8 +539,8 @@ export function createBot() {
       if (result.picks.length === 0) {
         await ctx.reply(
           `🕵️ *Whale Watch Selesai*\n\n` +
-          `Tidak ada jejak akumulasi yang terdeteksi saat ini.\n` +
-          `Market sedang tenang, tidak ada setup pre-pump.\n\n` +
+          `Tidak ada akumulasi whale on-chain yang terkonfirmasi saat ini.\n` +
+          `Jika ini scan pertama, baseline snapshot baru dibuat dan scan berikutnya baru bisa membandingkan akumulasi/distribusi.\n\n` +
           `_Coba /hype untuk scan momentum, atau tunggu 1 jam._`,
           { parse_mode: 'Markdown' }
         );

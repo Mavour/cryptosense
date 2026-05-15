@@ -315,6 +315,11 @@ function buildDiscoveryPrompt(coinData, mode = 'safe') {
   const coinList = coinData.map(c => {
     let line = `• ${c.symbol} | Price: $${c.price} | 1h: ${c.change1h}% | 24h: ${c.change24h}% | Vol spike: ${c.volumeSpike}x | RSI: ${c.rsi}`;
     if (isEarly) {
+      if (c.whaleTrend) {
+        line += ` | On-chain whale: ${c.whaleTrend} score ${c.whaleScore ?? 0}/10`;
+        if (c.whaleNetPct !== null && c.whaleNetPct !== undefined) line += ` net ${c.whaleNetPct}% supply`;
+        if (c.whaleWallets !== null && c.whaleWallets !== undefined) line += ` wallets ${c.whaleWallets}`;
+      }
       if (c.bbSqueeze) line += ` | 🌀 BB Squeeze`;
       if (c.fundingRate !== null && c.fundingRate < 0) line += ` | 📉 Funding ${(c.fundingRate * 100).toFixed(4)}%`;
       if (c.hasEvent) line += ` | 📅 Event: ${c.eventTitle?.slice(0, 40)}`;
@@ -343,6 +348,8 @@ Kriteria seleksi EARLY MODE (deteksi dini):
 - 4H EMA20 > EMA50 = higher timeframe trend healthy, fondasi kuat.
 - Funding rate negatif = banyak short, potensi short squeeze.
 - Event upcoming dalam 7 hari = catalyst yang bisa trigger breakout.
+- WAJIB: Prioritaskan hanya coin dengan On-chain whale ACCUMULATION. Jika on-chain BASELINE/NEUTRAL/UNSUPPORTED, jangan sebut sebagai buy signal; sebut "watchlist only".
+- Jika whale DISTRIBUTION, jangan rekomendasikan entry walaupun teknikal terlihat bullish.
 - JANGAN rekomendasikan coin yang sudah naik >8% dalam 24 jam. Itu sudah late.
 
 Format output WHALE WATCH:

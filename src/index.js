@@ -183,6 +183,7 @@ async function main() {
     { command: 'analyze', description: '📊 Analisis lengkap TA + AI    |  /analyze ETH 4h' },
     { command: 'news',    description: '📰 Analisis sentimen berita     |  /news BTC' },
     { command: 'early',   description: '🕵️ Deteksi akumulasi sebelum pump' },
+    { command: 'whale',   description: '🐋 Cek akumulasi whale on-chain | /whale BONK' },
     { command: 'hype',    description: '🔥 Cari coin viral & momentum (agresif)' },
     { command: 'scan',    description: '🔍 Cari coin oversold + bounce (safe mode)' },
     { command: 'watch',   description: '👁 Tambah watchlist  |  /watch BTC ETH SOL' },

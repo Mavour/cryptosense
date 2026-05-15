@@ -101,6 +101,9 @@ pm2 monit
 | `/wave SOL 1h` | Elliott Wave explanation |
 | `/news BTC` | Analisis sentimen berita |
 | `/scan` | Coin discovery scan |
+| `/early` | Deteksi akumulasi whale sebelum pump |
+| `/whale BONK` | Cek akumulasi whale on-chain Solana |
+| `/hype` | Cari coin viral & momentum |
 | `/macro` | Macro market overview |
 | `/watch BTC ETH` | Tambah watchlist |
 | `/unwatch BTC` | Hapus dari watchlist |

@@ -11,18 +11,30 @@
  */
 
 import axios from 'axios';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { join } from 'path';
 
 // ─────────────────────────────────────────────
 // Simple in-memory cache
 // ─────────────────────────────────────────────
 const cache = new Map();
 const CACHE_TTL = (parseInt(process.env.CACHE_TTL_MINUTES) || 5) * 60 * 1000;
+const DATA_DIR = join(process.cwd(), 'data');
+const WHALE_SNAPSHOT_FILE = join(DATA_DIR, 'whale-snapshots.json');
+const SOLANA_NATIVE_MINT = 'So11111111111111111111111111111111111111112';
 
 function getCached(key) {
   const entry = cache.get(key);
   if (!entry) return null;
   if (Date.now() - entry.ts > CACHE_TTL) { cache.delete(key); return null; }
   return entry.data;
+}
+
+function hasFreshCache(key) {
+  const entry = cache.get(key);
+  if (!entry) return false;
+  if (Date.now() - entry.ts > CACHE_TTL) { cache.delete(key); return false; }
+  return true;
 }
 
 function setCache(key, data) {
@@ -357,6 +369,310 @@ export async function fetchTopGainers(timeframe = '24h', limit = 50) {
 // Key optional: tanpa key tetap jalan (30 req/min), dengan key lebih longgar
 // Sentimen tidak tersedia di API — akan dianalisis AI di analyzer.js
 // ─────────────────────────────────────────────
+// On-chain Solana whale tracking.
+// Builds a local time series from top token-account snapshots, then compares
+// the newest holder balances with the previous scan.
+function parseJsonEnv(name, fallback = {}) {
+  try {
+    return process.env[name] ? JSON.parse(process.env[name]) : fallback;
+  } catch (e) {
+    console.warn(`[MarketData] Invalid JSON in ${name}: ${e.message}`);
+    return fallback;
+  }
+}
+
+function isLikelySolanaMint(value) {
+  return typeof value === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value);
+}
+
+function getSolanaRpcUrl() {
+  if (process.env.SOLANA_RPC_URL) return process.env.SOLANA_RPC_URL;
+  if (process.env.HELIUS_API_KEY) {
+    return `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
+  }
+  return 'https://api.mainnet-beta.solana.com';
+}
+
+async function solanaRpc(method, params = []) {
+  const res = await axios.post(getSolanaRpcUrl(), {
+    jsonrpc: '2.0',
+    id: Date.now(),
+    method,
+    params,
+  }, { timeout: 12000 });
+
+  if (res.data?.error) {
+    throw new Error(`Solana RPC ${method} error: ${res.data.error.message}`);
+  }
+  return res.data?.result;
+}
+
+function loadWhaleSnapshots() {
+  mkdirSync(DATA_DIR, { recursive: true });
+  if (!existsSync(WHALE_SNAPSHOT_FILE)) return {};
+
+  try {
+    return JSON.parse(readFileSync(WHALE_SNAPSHOT_FILE, 'utf8'));
+  } catch (e) {
+    console.warn(`[MarketData] Could not read whale snapshots: ${e.message}`);
+    return {};
+  }
+}
+
+function saveWhaleSnapshot(snapshot) {
+  const db = loadWhaleSnapshots();
+  const mint = snapshot.mintAddress;
+  if (!db[mint]) db[mint] = [];
+
+  db[mint].push(snapshot);
+  db[mint] = db[mint]
+    .sort((a, b) => new Date(a.ts) - new Date(b.ts))
+    .slice(-24);
+
+  writeFileSync(WHALE_SNAPSHOT_FILE, JSON.stringify(db, null, 2));
+}
+
+function getPreviousWhaleSnapshot(mintAddress) {
+  const db = loadWhaleSnapshots();
+  const snapshots = (db[mintAddress] || [])
+    .sort((a, b) => new Date(b.ts) - new Date(a.ts));
+  return snapshots[0] || null;
+}
+
+export async function fetchCoinSolanaMint(coinOrSymbol) {
+  const symbol = typeof coinOrSymbol === 'string'
+    ? coinOrSymbol.toUpperCase()
+    : coinOrSymbol?.symbol?.toUpperCase();
+  const id = typeof coinOrSymbol === 'object' ? coinOrSymbol?.id : null;
+  const cacheKey = `solana-mint:${id || symbol || 'unknown'}`;
+
+  if (hasFreshCache(cacheKey)) return getCached(cacheKey);
+
+  const overrides = {
+    SOL: SOLANA_NATIVE_MINT,
+    ...parseJsonEnv('SOLANA_MINT_OVERRIDES', {}),
+    ...parseJsonEnv('TOKEN_MINT_OVERRIDES', {}),
+  };
+
+  if (symbol && isLikelySolanaMint(overrides[symbol])) {
+    setCache(cacheKey, overrides[symbol]);
+    return overrides[symbol];
+  }
+
+  const directMint = typeof coinOrSymbol === 'object'
+    ? (coinOrSymbol?.platforms?.solana || coinOrSymbol?.mintAddress)
+    : null;
+  if (isLikelySolanaMint(directMint)) {
+    setCache(cacheKey, directMint);
+    return directMint;
+  }
+
+  if (!id) {
+    setCache(cacheKey, null);
+    return null;
+  }
+
+  const headers = {};
+  if (process.env.COINGECKO_API_KEY) {
+    headers['x-cg-demo-api-key'] = process.env.COINGECKO_API_KEY;
+  }
+
+  try {
+    const data = await fetchWithRetry(async () => {
+      const res = await axios.get(`https://api.coingecko.com/api/v3/coins/${id}`, {
+        params: {
+          localization: false,
+          tickers: false,
+          market_data: false,
+          community_data: false,
+          developer_data: false,
+          sparkline: false,
+        },
+        headers,
+        timeout: 12000,
+      });
+      return res.data;
+    }, 2, 800);
+
+    const mint = data?.platforms?.solana || data?.detail_platforms?.solana?.contract_address || null;
+    const result = isLikelySolanaMint(mint) ? mint : null;
+    setCache(cacheKey, result);
+    return result;
+  } catch (e) {
+    console.warn(`[MarketData] Could not resolve Solana mint for ${symbol || id}: ${e.message}`);
+    setCache(cacheKey, null);
+    return null;
+  }
+}
+
+export async function fetchSolanaWhaleAccumulation({ symbol, coin = null, mintAddress = null, priceUsd = null } = {}) {
+  const upperSymbol = symbol?.toUpperCase() || coin?.symbol?.toUpperCase() || 'UNKNOWN';
+  const mint = mintAddress || await fetchCoinSolanaMint(coin || upperSymbol);
+
+  if (!mint) {
+    return {
+      supported: false,
+      symbol: upperSymbol,
+      trend: 'UNSUPPORTED',
+      score: 0,
+      reason: 'No Solana mint found. Add SOLANA_MINT_OVERRIDES for this symbol if it is a Solana token.',
+    };
+  }
+
+  const cacheKey = `whales:${mint}`;
+  const cached = getCached(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const [largestResult, supplyResult] = await Promise.all([
+      solanaRpc('getTokenLargestAccounts', [mint]),
+      solanaRpc('getTokenSupply', [mint]),
+    ]);
+
+    const largestAccounts = (largestResult?.value || [])
+      .map(a => ({
+        tokenAccount: a.address,
+        balance: Number(a.uiAmountString ?? a.uiAmount ?? 0),
+      }))
+      .filter(a => Number.isFinite(a.balance) && a.balance > 0)
+      .slice(0, 20);
+
+    const supply = Number(supplyResult?.value?.uiAmountString ?? supplyResult?.value?.uiAmount ?? 0);
+    if (!largestAccounts.length || !Number.isFinite(supply) || supply <= 0) {
+      throw new Error('Token supply or largest accounts unavailable');
+    }
+
+    const accountInfo = await solanaRpc('getMultipleAccounts', [
+      largestAccounts.map(a => a.tokenAccount),
+      { encoding: 'jsonParsed' },
+    ]);
+
+    const byOwner = new Map();
+    largestAccounts.forEach((account, i) => {
+      const owner = accountInfo?.value?.[i]?.data?.parsed?.info?.owner || account.tokenAccount;
+      const existing = byOwner.get(owner) || { owner, balance: 0, tokenAccounts: [] };
+      existing.balance += account.balance;
+      existing.tokenAccounts.push(account.tokenAccount);
+      byOwner.set(owner, existing);
+    });
+
+    const holders = [...byOwner.values()]
+      .map(h => ({
+        ...h,
+        pctSupply: Number(((h.balance / supply) * 100).toFixed(4)),
+      }))
+      .sort((a, b) => b.balance - a.balance)
+      .slice(0, 20);
+
+    const topBalance = holders.reduce((sum, h) => sum + h.balance, 0);
+    const topPctSupply = Number(((topBalance / supply) * 100).toFixed(4));
+    const previous = getPreviousWhaleSnapshot(mint);
+    const snapshot = {
+      ts: new Date().toISOString(),
+      symbol: upperSymbol,
+      mintAddress: mint,
+      supply,
+      topPctSupply,
+      holders,
+    };
+
+    let result;
+    if (!previous) {
+      result = {
+        supported: true,
+        symbol: upperSymbol,
+        mintAddress: mint,
+        trend: 'BASELINE',
+        score: 0,
+        topPctSupply,
+        netDelta: 0,
+        netDeltaPctSupply: 0,
+        netDeltaUsd: 0,
+        accumulatingWallets: 0,
+        distributingWallets: 0,
+        ageMinutes: null,
+        reason: 'Baseline snapshot saved. Run another scan later to detect accumulation/distribution.',
+      };
+    } else {
+      const prevByOwner = new Map(previous.holders.map(h => [h.owner, h.balance]));
+      const currByOwner = new Map(holders.map(h => [h.owner, h.balance]));
+      const owners = new Set([...prevByOwner.keys(), ...currByOwner.keys()]);
+      const deltas = [...owners].map(owner => {
+        const current = currByOwner.get(owner) || 0;
+        const prev = prevByOwner.get(owner) || 0;
+        return { owner, delta: current - prev, current, previous: prev };
+      });
+
+      const minWalletDelta = Math.max(supply * 0.0002, priceUsd ? 25_000 / priceUsd : 0);
+      const accumulating = deltas.filter(d => d.delta >= minWalletDelta);
+      const distributing = deltas.filter(d => d.delta <= -minWalletDelta);
+      const netDelta = deltas.reduce((sum, d) => sum + d.delta, 0);
+      const netDeltaPctSupply = Number(((netDelta / supply) * 100).toFixed(4));
+      const netDeltaUsd = priceUsd ? Number((netDelta * priceUsd).toFixed(2)) : null;
+      const topPctDelta = topPctSupply - (previous.topPctSupply || 0);
+      let score = 0;
+
+      if (netDeltaPctSupply >= 0.5) score += 4;
+      else if (netDeltaPctSupply >= 0.25) score += 3;
+      else if (netDeltaPctSupply >= 0.1) score += 2;
+      else if (netDeltaPctSupply > 0) score += 1;
+
+      if (accumulating.length >= 5) score += 2;
+      else if (accumulating.length >= 3) score += 1.5;
+      else if (accumulating.length >= 1) score += 0.75;
+
+      if (topPctDelta >= 0.5) score += 2;
+      else if (topPctDelta >= 0.15) score += 1;
+
+      if (netDeltaUsd !== null && netDeltaUsd >= 1_000_000) score += 1;
+      else if (netDeltaUsd !== null && netDeltaUsd >= 250_000) score += 0.5;
+
+      if (distributing.length >= accumulating.length && netDeltaPctSupply < 0) score -= 2;
+      score = Math.max(0, Math.min(10, Number(score.toFixed(1))));
+
+      const trend = netDeltaPctSupply <= -0.1
+        ? 'DISTRIBUTION'
+        : score >= 4
+          ? 'ACCUMULATION'
+          : 'NEUTRAL';
+
+      result = {
+        supported: true,
+        symbol: upperSymbol,
+        mintAddress: mint,
+        trend,
+        score,
+        topPctSupply,
+        topPctDelta: Number(topPctDelta.toFixed(4)),
+        netDelta: Number(netDelta.toFixed(4)),
+        netDeltaPctSupply,
+        netDeltaUsd,
+        accumulatingWallets: accumulating.length,
+        distributingWallets: distributing.length,
+        ageMinutes: Number(((Date.now() - new Date(previous.ts).getTime()) / 60000).toFixed(1)),
+        reason: trend === 'ACCUMULATION'
+          ? 'Top whale balances increased versus previous on-chain snapshot.'
+          : trend === 'DISTRIBUTION'
+            ? 'Top whale balances decreased versus previous on-chain snapshot.'
+            : 'No meaningful top-holder accumulation versus previous snapshot.',
+      };
+    }
+
+    saveWhaleSnapshot(snapshot);
+    setCache(cacheKey, result);
+    return result;
+  } catch (e) {
+    return {
+      supported: false,
+      symbol: upperSymbol,
+      mintAddress: mint,
+      trend: 'ERROR',
+      score: 0,
+      reason: e.message,
+    };
+  }
+}
+
 export async function fetchCryptoNews(currencies = [], filter = 'hot') {
   const cacheKey = `news:${currencies.join(',')}:${filter}`;
   const cached = getCached(cacheKey);

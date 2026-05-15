@@ -24,6 +24,7 @@ import {
   fetchFundingRate,
   fetchBinanceDepth,
   scrapeCoinMarketCal,
+  fetchSolanaWhaleAccumulation,
 } from '../ta/marketData.js';
 import { runFullAnalysis, detectBBSqueeze } from '../ta/indicators.js';
 import { scoreDiscoveredCoins } from '../ai/analyzer.js';
@@ -56,7 +57,7 @@ const EARLY_FILTERS = {
 // ─────────────────────────────────────────────
 // Scoring: Early (0-10) — "diam-diam ramai"
 // ─────────────────────────────────────────────
-function scoreEarly(coin, ta, volumeSpike, bbSqueeze, fundingData, eventData, depthData) {
+function scoreEarly(coin, ta, volumeSpike, bbSqueeze, fundingData, eventData, depthData, whaleData) {
   let score = 0;
   const change1h = coin.price_change_percentage_1h_in_currency || 0;
   const change24h = coin.price_change_percentage_24h || 0;
@@ -87,6 +88,10 @@ function scoreEarly(coin, ta, volumeSpike, bbSqueeze, fundingData, eventData, de
 
   // 7. Order book bid heavy (max 0.5 pt)
   if (depthData && depthData.bidAskRatio > 1.5) score += 0.5;
+
+  // 8. Real on-chain whale accumulation (max 2.5 pts)
+  if (whaleData?.trend === 'ACCUMULATION') score += Math.min(2.5, 1 + (whaleData.score * 0.2));
+  else if (whaleData?.trend === 'DISTRIBUTION') score -= 3;
 
   return parseFloat(score.toFixed(1));
 }
@@ -179,6 +184,7 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
   const scanStart = Date.now();
   const isHype = mode === 'hype';
   const isEarly = mode === 'early';
+  const requireWhaleAccumulation = process.env.STRICT_WHALE_ACCUMULATION !== 'false';
 
   // ── Fetch data sources ──────────────────────
   const [topCoins, trending, gainers] = await Promise.all([
@@ -269,6 +275,7 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
       let fundingData = null;
       let eventData = null;
       let depthData = null;
+      let whaleData = null;
 
       if (isEarly) {
         bbSqueeze = detectBBSqueeze(candles, 20, 10, 4.0);
@@ -304,7 +311,7 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
       if (isHype) {
         score = scoreHype(coin, ta, trendingMap[symbol] || null, volumeSpike, newsScore);
       } else if (isEarly) {
-        score = scoreEarly(coin, ta, volumeSpike, bbSqueeze, fundingData, eventData, depthData);
+        score = scoreEarly(coin, ta, volumeSpike, bbSqueeze, fundingData, eventData, depthData, whaleData);
       } else {
         score = scoreSafe(coin, ta, volumeSpike, newsScore);
       }
@@ -315,6 +322,8 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
       const candidate = {
         symbol,
         name: coin.name,
+        coinId: coin.id,
+        coin,
         price: coin.current_price,
         change1h: parseFloat((coin.price_change_percentage_1h_in_currency || 0).toFixed(2)),
         change24h: parseFloat((coin.price_change_percentage_24h || 0).toFixed(2)),
@@ -345,6 +354,13 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
         candidate.hasEvent = eventData?.hasEvent || false;
         candidate.eventTitle = eventData?.events?.[0]?.title || null;
         candidate.bidAskRatio = depthData?.bidAskRatio || null;
+        candidate.whaleTrend = null;
+        candidate.whaleScore = null;
+        candidate.whaleNetPct = null;
+        candidate.whaleNetUsd = null;
+        candidate.whaleTopPct = null;
+        candidate.whaleWallets = null;
+        candidate.whaleReason = null;
       }
 
       if (isHype) {
@@ -371,6 +387,28 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
 
     for (let i = 0; i < topForEnrich.length; i++) {
       const c = topForEnrich[i];
+      try {
+        const whale = await fetchSolanaWhaleAccumulation({
+          symbol: c.symbol,
+          coin: c.coin,
+          priceUsd: c.price,
+        });
+
+        c.whaleTrend = whale.trend;
+        c.whaleScore = whale.score;
+        c.whaleNetPct = whale.netDeltaPctSupply ?? null;
+        c.whaleNetUsd = whale.netDeltaUsd ?? null;
+        c.whaleTopPct = whale.topPctSupply ?? null;
+        c.whaleWallets = whale.accumulatingWallets ?? null;
+        c.whaleReason = whale.reason;
+        c.mintAddress = whale.mintAddress || null;
+
+        if (whale.trend === 'ACCUMULATION') c.score += Math.min(2.5, 1 + (whale.score * 0.2));
+        else if (whale.trend === 'DISTRIBUTION') c.score -= 3;
+        else if (whale.trend === 'BASELINE') c.score -= 0.5;
+        else if (whale.trend === 'UNSUPPORTED' || whale.trend === 'ERROR') c.score -= 1;
+      } catch (e) { /* skip */ }
+
       try {
         // Funding rate (optional)
         const funding = await fetchFundingRate(c.symbol);
@@ -406,6 +444,21 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
 
     // Re-sort setelah enrichment
     candidates.sort((a, b) => b.score - a.score);
+
+    if (requireWhaleAccumulation) {
+      for (let i = candidates.length - 1; i >= 0; i--) {
+        if (candidates[i].whaleTrend !== 'ACCUMULATION') {
+          candidates.splice(i, 1);
+        }
+      }
+      console.log(`[Scanner] Early mode: ${candidates.length} candidates after on-chain whale accumulation gate`);
+    } else {
+      for (let i = candidates.length - 1; i >= 0; i--) {
+        if (candidates[i].whaleTrend === 'DISTRIBUTION') {
+          candidates.splice(i, 1);
+        }
+      }
+    }
   }
 
   // ── Sort & limit ─────────────────────────────
@@ -420,7 +473,7 @@ export async function runCoinScan(limit = 250, mode = 'safe') {
     const msgMap = {
       safe: 'Tidak ada coin yang memenuhi kriteria scan saat ini. Market mungkin sedang sideways.',
       hype: 'Tidak ada coin hype/momentum yang terdeteksi saat ini. Market sedang tenang atau volume rendah.',
-      early: 'Tidak ada jejak akumulasi whale yang terdeteksi saat ini. Market sedang tenang, tidak ada setup pre-pump yang ketat.',
+      early: 'Tidak ada jejak akumulasi whale on-chain yang terkonfirmasi saat ini. Jika ini scan pertama, bot baru membuat baseline snapshot; scan berikutnya baru bisa membandingkan akumulasi/distribusi.',
     };
     return { picks: [], aiAnalysis: msgMap[mode] || msgMap.safe };
   }
@@ -477,6 +530,12 @@ function formatFallbackScanResult(candidates, mode = 'safe') {
     text += `📊 RSI: ${c.rsi} | Vol: ${c.volumeSpike}x rata-rata\n`;
 
     if (mode === 'early') {
+      if (c.whaleTrend) {
+        const whaleNet = c.whaleNetPct !== null && c.whaleNetPct !== undefined
+          ? `${c.whaleNetPct >= 0 ? '+' : ''}${c.whaleNetPct}% supply`
+          : 'baseline';
+        text += `🐋 On-chain: ${c.whaleTrend} | ${whaleNet} | wallets: ${c.whaleWallets ?? 'N/A'}\n`;
+      }
       if (c.bbSqueeze) text += `🌀 BB Squeeze detected!\n`;
       if (c.fundingRate !== null && c.fundingRate < 0) text += `📉 Funding negatif: ${(c.fundingRate * 100).toFixed(4)}%\n`;
       if (c.hasEvent) text += `📅 Event: ${c.eventTitle}\n`;
