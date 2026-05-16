@@ -103,7 +103,7 @@ pm2 monit
 | `/scan` | Coin discovery scan |
 | `/early` | Deteksi akumulasi smart money CEX sebelum pump |
 | `/whale BTC` | Cek smart money CEX |
-| `/hype` | Cari coin viral & momentum |
+| `/hype` | Cari coin viral & momentum manual |
 | `/macro` | Macro market overview |
 | `/watch BTC ETH` | Tambah watchlist |
 | `/unwatch BTC` | Hapus dari watchlist |

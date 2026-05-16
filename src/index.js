@@ -87,30 +87,36 @@ function setupCronJobs(bot) {
     }
   });
 
-  // Hype scan: setiap 2 jam di menit ke-30 (offset biar gak tabrakan)
-  console.log(`[Cron] Hype scan scheduled every 2 hours`);
+  // Hype scan stays manual by default. Auto-broadcasting momentum picks can
+  // create FOMO alerts after price has already moved.
+  const autoBroadcastHype = process.env.AUTO_BROADCAST_HYPE === 'true';
+  if (autoBroadcastHype) {
+    console.log(`[Cron] Hype scan scheduled every 2 hours`);
 
-  cron.schedule('30 */2 * * *', async () => {
-    console.log('[Cron] Running scheduled HYPE scan...');
+    cron.schedule('30 */2 * * *', async () => {
+      console.log('[Cron] Running scheduled HYPE scan...');
 
-    try {
-      const result = await runCoinScan(250, 'hype');
+      try {
+        const result = await runCoinScan(250, 'hype');
 
-      if (result.picks.length === 0) {
-        console.log('[Cron] No hype picks found this scan');
-        return;
+        if (result.picks.length === 0) {
+          console.log('[Cron] No hype picks found this scan');
+          return;
+        }
+
+        const header = `🔥 *AUTO-SCAN — HYPE MODE (MANUAL OPT-IN)*\n_${new Date().toLocaleString('id-ID')}_\n\n`;
+        const message = header + result.aiAnalysis;
+
+        await broadcastToUsers(bot, message);
+        console.log(`[Cron] Hype scan complete. Sent ${result.picks.length} picks.`);
+
+      } catch (err) {
+        console.error('[Cron] Hype scan failed:', err.message);
       }
-
-      const header = `🔥 *AUTO-SCAN — HYPE MODE*\n_${new Date().toLocaleString('id-ID')}_\n\n`;
-      const message = header + result.aiAnalysis;
-
-      await broadcastToUsers(bot, message);
-      console.log(`[Cron] Hype scan complete. Sent ${result.picks.length} picks.`);
-
-    } catch (err) {
-      console.error('[Cron] Hype scan failed:', err.message);
-    }
-  });
+    });
+  } else {
+    console.log('[Cron] Hype auto-broadcast disabled. Use /hype manually for momentum scans.');
+  }
 
   // Early scan: setiap jam di menit ke-15 (offset biar gak tabrakan)
   console.log(`[Cron] Early scan scheduled every hour (except 00:00-04:00 WITA quiet hours)`);
